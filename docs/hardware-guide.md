@@ -6,6 +6,10 @@ This project uses an ESP32 microcontroller, an ILI9341 TFT display, and an XPT20
 
 The current version supports touchscreen navigation and simulated playback. Real MP3 audio playback is still under development.
 
+## Hardware Prototype
+
+![ESP32 touchscreen MP3 player prototype](Images/esp32-touchscreen.jpg)
+
 ## 2. Hardware Components
 
 - ESP32 Dev Module

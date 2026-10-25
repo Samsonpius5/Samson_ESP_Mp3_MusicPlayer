@@ -40,3 +40,8 @@ Audio playback and microSD card integration have not yet been implemented.
 
 ## Learning Objectives
 This project is helping me develop practical skills in embedded C++, microcontroller programming, SPI communication, touchscreen interfaces, debugging, and firmware development.
+
+## Hardware Documentation
+See the [ESP32 Hardware Guide](docs/hardware-guide.md)
+for the wiring connections, touchscreen calibration,
+hardware photograph, and firmware setup instructions.
