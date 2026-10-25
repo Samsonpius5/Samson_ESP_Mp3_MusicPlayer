@@ -1,0 +1,193 @@
+
+#include <Arduino.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+#include <XPT2046_Touchscreen.h>
+
+// TFT display pins
+#define TFT_CS   27
+#define TFT_DC   26
+#define TFT_RST  25
+
+// Touch controller
+#define TOUCH_CS 33
+
+// Shared SPI pins
+#define SPI_SCK  18
+#define SPI_MISO 19
+#define SPI_MOSI 23
+
+// Calibration values from your measurements
+#define RAW_LEFT   421
+#define RAW_RIGHT  3425
+#define RAW_TOP    630
+#define RAW_BOTTOM 3526
+
+// PLAY button position
+#define BTN_X 95
+#define BTN_Y 150
+#define BTN_W 130
+#define BTN_H 55
+
+// Create hardware objects
+Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
+XPT2046_Touchscreen touch(TOUCH_CS);
+
+// Player state
+bool isPlaying = false;
+bool previousTouch = false;
+
+// Convert raw X to screen X
+int convertX(int rawX) {
+    int x = map(rawX, RAW_LEFT, RAW_RIGHT, 25, 295);
+    return constrain(x, 0, 319);
+}
+
+// Convert raw Y to screen Y
+int convertY(int rawY) {
+    int y = map(rawY, RAW_TOP, RAW_BOTTOM, 30, 210);
+    return constrain(y, 0, 239);
+}
+
+// Draw the PLAY or PAUSE button
+void drawButton() {
+
+    uint16_t color = isPlaying
+        ? ILI9341_YELLOW
+        : ILI9341_WHITE;
+
+    tft.fillRoundRect(
+        BTN_X, BTN_Y,
+        BTN_W, BTN_H,
+        10, color
+    );
+
+    tft.setTextColor(ILI9341_BLACK);
+    tft.setTextSize(3);
+
+    if (isPlaying) {
+        tft.setCursor(115, 165);
+        tft.print("PAUSE");
+    } else {
+        tft.setCursor(124, 165);
+        tft.print("PLAY");
+    }
+}
+
+// Update playback status
+void drawStatus() {
+
+    tft.fillRect(
+        0, 100, 320, 35,
+        ILI9341_BLACK
+    );
+
+    tft.setTextSize(2);
+
+    if (isPlaying) {
+        tft.setTextColor(ILI9341_GREEN);
+        tft.setCursor(75, 110);
+        tft.print("PLAYING DEMO");
+    } else {
+        tft.setTextColor(ILI9341_WHITE);
+        tft.setCursor(125, 110);
+        tft.print("PAUSED");
+    }
+}
+
+// Check if coordinates are inside button
+bool insideButton(int x, int y) {
+
+    return (
+        x >= BTN_X &&
+        x < BTN_X + BTN_W &&
+        y >= BTN_Y &&
+        y < BTN_Y + BTN_H
+    );
+}
+
+void setup() {
+
+    Serial.begin(115200);
+
+    // Deselect SPI devices
+    pinMode(TFT_CS, OUTPUT);
+    pinMode(TOUCH_CS, OUTPUT);
+
+    digitalWrite(TFT_CS, HIGH);
+    digitalWrite(TOUCH_CS, HIGH);
+
+    SPI.begin(
+        SPI_SCK,
+        SPI_MISO,
+        SPI_MOSI
+    );
+
+    // Start TFT display
+    tft.begin();
+    tft.setRotation(1);
+
+    // Start touchscreen
+    if (!touch.begin()) {
+        Serial.println("Touch initialization failed");
+        while (true) {
+            delay(1000);
+        }
+    }
+
+    touch.setRotation(1);
+
+    // Draw main screen
+    tft.fillScreen(ILI9341_BLACK);
+
+    tft.setTextColor(ILI9341_CYAN);
+    tft.setTextSize(3);
+    tft.setCursor(70, 30);
+    tft.print("MP3 PLAYER");
+
+    drawStatus();
+    drawButton();
+
+    Serial.println("Touch music player ready!");
+}
+
+void loop() {
+
+    bool pressed = touch.touched();
+
+    // Respond only to a new touch
+    if (pressed && !previousTouch) {
+
+        TS_Point p = touch.getPoint();
+
+        int x = convertX(p.x);
+        int y = convertY(p.y);
+
+        // Show coordinates for debugging
+        Serial.print("Screen X: ");
+        Serial.print(x);
+
+        Serial.print(" | Screen Y: ");
+        Serial.println(y);
+
+        // Was the PLAY/PAUSE button touched?
+        if (insideButton(x, y)) {
+
+            isPlaying = !isPlaying;
+
+            drawButton();
+            drawStatus();
+
+            if (isPlaying) {
+                Serial.println("PLAY pressed!");
+            } else {
+                Serial.println("PAUSE pressed!");
+            }
+        }
+    }
+
+    previousTouch = pressed;
+
+    delay(30);
+}
