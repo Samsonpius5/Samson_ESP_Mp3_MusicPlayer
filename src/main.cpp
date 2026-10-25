@@ -36,7 +36,8 @@ const char* songs[] = {
     "Song 4.mp3"
 };
 
-// Calculate number of songs automatically
+
+// Calculate number of songs automatically.
 const int songCount = sizeof(songs) / sizeof(songs[0]);
 
 int currentSong = 0;
@@ -62,9 +63,6 @@ void inspectSelectedSong() {
         static_cast<const void*>(selected)
     );
 }
-
-
-
 
 
 
