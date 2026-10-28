@@ -50,7 +50,8 @@ bool favoriteSongs[songCount] = {};
 // Screen management
 enum class Screen {
     Splash,
-    NowPlaying
+    NowPlaying,
+    Library
 };
 
 Screen currentScreen = Screen::Splash;
@@ -447,6 +448,74 @@ void drawPlayerScreen() {
     drawFavouriteHeart();
 }
 
+
+void drawLibraryScreen() {
+
+    uint16_t background = tft.color565(24, 16, 27);
+    uint16_t cardColor = tft.color565(36, 30, 43);
+    uint16_t borderColor = tft.color565(68, 57, 76);
+    uint16_t mutedText = tft.color565(180, 170, 185);
+
+    // Clear screen
+    tft.fillScreen(background);
+
+    // Back arrow
+    tft.drawLine(30, 24, 14, 24, ILI9341_WHITE);
+    tft.drawLine(14, 24, 22, 16, ILI9341_WHITE);
+    tft.drawLine(14, 24, 22, 32, ILI9341_WHITE);
+
+    // Header
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(50, 20);
+    tft.print("ESP32 MUSIC PLAYER");
+
+    // Page title
+    tft.setTextSize(2);
+    tft.setCursor(16, 57);
+    tft.print("MY LIBRARY");
+
+    // All Songs card
+    tft.fillRoundRect(16, 84, 288, 78, 8, cardColor);
+    tft.drawRoundRect(16, 84, 288, 78, 8, borderColor);
+
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setTextSize(2);
+    tft.setCursor(34, 108);
+    tft.print("All Songs");
+
+    tft.setTextColor(mutedText);
+    tft.setTextSize(1);
+    tft.setCursor(34, 138);
+    tft.print("Browse your music");
+
+    // Favourites card
+    tft.fillRoundRect(16, 172, 140, 52, 8, cardColor);
+    tft.drawRoundRect(16, 172, 140, 52, 8, borderColor);
+
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(28, 188);
+    tft.print("Favourites");
+
+    tft.setTextColor(mutedText);
+    tft.setCursor(28, 206);
+    tft.print("Saved Songs");
+
+    // Most Played card
+    tft.fillRoundRect(164, 172, 140, 52, 8, cardColor);
+    tft.drawRoundRect(164, 172, 140, 52, 8, borderColor);
+
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(176, 188);
+    tft.print("Most Played");
+
+    tft.setTextColor(mutedText);
+    tft.setCursor(176, 206);
+    tft.print("Top Tracks");
+}
+
+
+
 void drawSplashScreen() {
 
     tft.fillScreen(ILI9341_WHITE);
@@ -658,6 +727,37 @@ void loop() {
         Serial.print(x);
         Serial.print(" Y: ");
         Serial.println(y);
+
+
+        // Handle touches on the Library screen
+        if (currentScreen == Screen::Library) {
+
+            // Back button
+            if (x <= 55 && y <= 55) {
+
+                currentScreen = Screen::NowPlaying;
+                drawPlayerScreen();
+
+                Serial.println("Returned to Now Playing");
+            }
+
+            previousTouch = true;
+            return;
+        }
+
+        // Open Library from Now Playing
+        if (currentScreen == Screen::NowPlaying &&
+            x >= 260 && y <= 55) {
+
+            currentScreen = Screen::Library;
+            drawLibraryScreen();
+
+            Serial.println("Library opened");
+
+            previousTouch = true;
+            return;
+        }
+
 
 
         // Respond to touches in the control row
