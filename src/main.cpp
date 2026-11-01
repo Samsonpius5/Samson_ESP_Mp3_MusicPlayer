@@ -43,6 +43,9 @@ const int songCount = sizeof(songs) / sizeof(songs[0]);
 int currentSong = 0;
 bool isPlaying = false;
 bool previousTouch = false;
+bool shuffleEnabled = false;
+bool repeatEnabled = false;
+bool favoriteSongs[songCount] = {};
 
 // Screen management
 enum class Screen {
@@ -87,7 +90,7 @@ void inspectSelectedSong() {
 
 
 // Button positions
-const int BTN_Y = 174;
+const int BTN_Y = 184;
 const int BTN_H = 48;
 
 const int PREV_X = 10;
@@ -150,88 +153,298 @@ void drawButton(
 }
 
 // Draw all controls
+
 void drawControls() {
 
-    drawButton(
-        PREV_X, PREV_W,
-        "PREV", ILI9341_CYAN
+    uint16_t background = tft.color565(24, 16, 27);
+    uint16_t white = ILI9341_WHITE;
+    uint16_t orange = tft.color565(255, 135, 75);
+
+    // Clear only the music controls area
+    tft.fillRect(0, 181, 320, 59, background);
+
+    // Active controls appear orange
+    uint16_t shuffleColor = shuffleEnabled ? orange : white;
+    uint16_t repeatColor = repeatEnabled ? orange : white;
+
+    // 1. SHUFFLE ICON
+    // Two crossing paths with arrowheads
+    tft.drawLine(15, 199, 24, 199, shuffleColor);
+    tft.drawLine(24, 199, 41, 215, shuffleColor);
+    tft.drawLine(41, 215, 46, 215, shuffleColor);
+    tft.drawLine(41, 210, 46, 215, shuffleColor);
+    tft.drawLine(41, 220, 46, 215, shuffleColor);
+
+    tft.drawLine(15, 215, 24, 215, shuffleColor);
+    tft.drawLine(24, 215, 41, 199, shuffleColor);
+    tft.drawLine(41, 199, 46, 199, shuffleColor);
+    tft.drawLine(41, 194, 46, 199, shuffleColor);
+    tft.drawLine(41, 204, 46, 199, shuffleColor);
+
+    // 2. PREVIOUS SONG ICON
+    tft.fillRect(76, 195, 3, 24, white);
+    tft.fillTriangle(
+        80, 207,
+        101, 194,
+        101, 220,
+        white
     );
 
-    uint16_t playColor = isPlaying
-        ? ILI9341_WHITE
-        : ILI9341_YELLOW;
+    // 3. CIRCULAR PLAY/PAUSE BUTTON
+    tft.fillCircle(160, 207, 24, white);
 
-    drawButton(
-        PLAY_X, PLAY_W,
-        isPlaying ? "PAUSE" : "PLAY",
-        playColor
+    if (isPlaying) {
+
+        // Pause icon: two vertical bars
+        tft.fillRoundRect(
+            151, 195, 6, 24, 2, background
+        );
+
+        tft.fillRoundRect(
+            163, 195, 6, 24, 2, background
+        );
+
+    } else {
+
+        // Play icon: right-facing triangle
+        tft.fillTriangle(
+            154, 194,
+            154, 220,
+            174, 207,
+            background
+        );
+    }
+
+    // 4. NEXT SONG ICON
+    tft.fillTriangle(
+        218, 194,
+        218, 220,
+        239, 207,
+        white
     );
 
-    drawButton(
-        NEXT_X, NEXT_W,
-        "NEXT", ILI9341_CYAN
-    );
+    tft.fillRect(240, 195, 3, 24, white);
+
+    // 5. REPEAT ICON
+    tft.drawFastHLine(280, 198, 18, repeatColor);
+    tft.drawLine(298, 198, 304, 204, repeatColor);
+    tft.drawLine(304, 204, 298, 210, repeatColor);
+
+    tft.drawFastHLine(280, 216, 18, repeatColor);
+    tft.drawLine(280, 216, 274, 210, repeatColor);
+    tft.drawLine(274, 210, 280, 204, repeatColor);
 }
+
 
 // Display selected song
 void drawSong() {
 
+    // Same background as the player screen
+    uint16_t background =
+        tft.color565(24, 16, 27);
+
+    // Clear the song title area
     tft.fillRect(
-        10, 85, 300, 40,
-        ILI9341_BLACK
+        12, 78,
+        240, 32,
+        background
     );
 
+    // Set song title colour and size
     tft.setTextColor(ILI9341_WHITE);
-    tft.setTextSize(2);
+    tft.setTextSize(3);
 
-    tft.setCursor(95, 97);
+    // Position song title
+    tft.setCursor(16, 81);
+
+    // Display currently selected song
     tft.print(songs[currentSong]);
 }
 
 // Display player state
 void drawStatus() {
 
+    // Player background colour
+    uint16_t background =
+        tft.color565(24, 16, 27);
+
+    // Muted text colour
+    uint16_t mutedText =
+        tft.color565(180, 170, 185);
+
+    // Orange indicator
+    uint16_t orange =
+        tft.color565(255, 135, 75);
+
+    // Clear only the status area
     tft.fillRect(
-        10, 130, 300, 35,
-        ILI9341_BLACK
+        12, 109, 296, 23,
+        background
     );
 
+    // Draw the orange dot
+    tft.fillCircle(
+        20, 120, 4,
+        orange
+    );
+
+    // Display playback status
+    tft.setTextColor(mutedText);
     tft.setTextSize(2);
+    tft.setCursor(32, 112);
 
     if (isPlaying) {
-        tft.setTextColor(ILI9341_GREEN);
-        tft.setCursor(82, 140);
-        tft.print("DEMO: PLAYING");
+        tft.print("DEMO - PLAY");
     } else {
-        tft.setTextColor(ILI9341_WHITE);
-        tft.setCursor(88, 140);
-        tft.print("DEMO: PAUSED");
+        tft.print("DEMO - PAUSE");
     }
+}
+
+
+void drawProgressBar() {
+
+    uint16_t background = tft.color565(24, 16, 27);
+    uint16_t purple = tft.color565(155, 70, 220);
+    uint16_t orange = tft.color565(255, 135, 75);
+
+    // Clear the progress bar area
+    tft.fillRect(12, 136, 296, 44, background);
+
+    // Time labels
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setTextSize(2);
+
+    tft.setCursor(16, 139);
+    tft.print("1:12");
+
+    tft.setCursor(256, 139);
+    tft.print("3:20");
+
+    // Progress bar dimensions
+    const int progressX = 16;
+    const int progressY = 167;
+    const int progressWidth = 288;
+    const int progressHeight = 6;
+
+    // Simulated progress: approximately 36%
+    const int playedWidth = 104;
+
+    // Full progress track
+    tft.fillRoundRect(
+        progressX, progressY,
+        progressWidth, progressHeight,
+        3, orange
+    );
+
+    // Played portion
+    tft.fillRoundRect(
+        progressX, progressY,
+        playedWidth, progressHeight,
+        3, purple
+    );
+
+    // Circular progress indicator
+    tft.fillCircle(
+        progressX + playedWidth,
+        progressY + 3,
+        7, orange
+    );
+
+    tft.drawCircle(
+        progressX + playedWidth,
+        progressY + 3,
+        7, ILI9341_WHITE
+    );
+}
+
+
+void drawFavouriteHeart() {
+
+    uint16_t background = tft.color565(24, 16, 27);
+    uint16_t orange = tft.color565(255, 135, 75);
+
+    // Clear the heart area
+    tft.fillRect(266, 78, 44, 31, background);
+
+    if (favoriteSongs[currentSong]) {
+
+        // Filled heart for a favourite song
+        tft.fillCircle(281, 89, 7, orange);
+        tft.fillCircle(295, 89, 7, orange);
+
+        tft.fillTriangle(
+            274, 91,
+            302, 91,
+            288, 106,
+            orange
+        );
+
+    } else {
+
+        // Outline heart
+        uint16_t white = ILI9341_WHITE;
+
+        tft.drawLine(288, 85, 284, 81, white);
+        tft.drawLine(284, 81, 278, 81, white);
+        tft.drawLine(278, 81, 273, 86, white);
+        tft.drawLine(273, 86, 273, 93, white);
+        tft.drawLine(273, 93, 288, 107, white);
+        tft.drawLine(288, 107, 303, 93, white);
+        tft.drawLine(303, 93, 303, 86, white);
+        tft.drawLine(303, 86, 298, 81, white);
+        tft.drawLine(298, 81, 292, 81, white);
+        tft.drawLine(292, 81, 288, 85, white);
+    }
+}
+
+
+void drawLibraryButton() {
+
+    uint16_t white = ILI9341_WHITE;
+
+    // Four small circles forming a grid
+    tft.drawCircle(284, 18, 4, white);
+    tft.drawCircle(300, 18, 4, white);
+
+    tft.drawCircle(284, 34, 4, white);
+    tft.drawCircle(300, 34, 4, white);
 }
 
 
 void drawPlayerScreen() {
 
-    tft.fillScreen(ILI9341_BLACK);
+    // Main background colour
+    uint16_t background =
+        tft.color565(24, 16, 27);
 
-    tft.setTextColor(ILI9341_CYAN);
+    // Secondary text colour
+    uint16_t mutedText =
+        tft.color565(180, 170, 185);
+
+    // Clear the screen
+    tft.fillScreen(background);
+
+    // Main heading
+    tft.setTextColor(ILI9341_WHITE);
     tft.setTextSize(2);
 
-    tft.setCursor(64, 16);
-    tft.print("ESP32 MP3 PLAYER");
+    tft.setCursor(16, 16);
+    tft.print("ESP32 MUSIC PLAYER");
+    drawLibraryButton();
 
-    tft.drawFastHLine(
-        15, 45, 290,
-        ILI9341_WHITE
-    );
-
+    // Section label
+    tft.setTextColor(mutedText);
     tft.setTextSize(1);
-    tft.setCursor(106, 65);
-    tft.print("SELECTED TRACK");
 
+    tft.setCursor(16, 65);
+    tft.print("NOW PLAYING");
+
+    // Existing functionality
     drawSong();
     drawStatus();
+    drawProgressBar();
     drawControls();
+    drawFavouriteHeart();
 }
 
 void drawSplashScreen() {
@@ -446,34 +659,72 @@ void loop() {
         Serial.print(" Y: ");
         Serial.println(y);
 
-        if (insideButton(x, y, PREV_X, PREV_W)) {
 
-            previousSong();
+        // Respond to touches in the control row
+        if (x >= 266 && x < 310 &&
+    y >= 78 && y < 110) {
 
-        } else if (insideButton(x, y, PLAY_X, PLAY_W)) {
+    favoriteSongs[currentSong] =
+        !favoriteSongs[currentSong];
 
-            isPlaying = !isPlaying;
+    drawFavouriteHeart();
 
-            printPlaybackStatus();
+    Serial.println(
+        favoriteSongs[currentSong]
+            ? "ADDED TO FAVOURITES"
+            : "REMOVED FROM FAVOURITES"
+    );
 
-            Serial.println(
-                isPlaying ? "PLAY" : "PAUSE"
-            );
+} else if (y >= 182 && y < 240) {
 
-        } else if (insideButton(x, y, NEXT_X, NEXT_W)) {
+            if (x < 60) {
 
-            nextSong();
+                // Shuffle
+                shuffleEnabled = !shuffleEnabled;
+
+                Serial.println(
+                    shuffleEnabled ? "SHUFFLE ON" : "SHUFFLE OFF"
+                );
+
+            } else if (x < 126) {
+
+                // Previous song
+                previousSong();
+
+            } else if (x < 194) {
+
+                // Play or pause
+                isPlaying = !isPlaying;
+
+                printPlaybackStatus();
+
+            } else if (x < 260) {
+
+                // Next song
+                nextSong();
+
+            } else {
+
+                // Repeat
+                repeatEnabled = !repeatEnabled;
+
+                Serial.println(
+                    repeatEnabled ? "REPEAT ON" : "REPEAT OFF"
+                );
+            }
+
+            // Update only the relevant UI elements
+            drawSong();
+            drawStatus();
+            drawControls();
+            drawFavouriteHeart();
         }
-
-        // Update the display
-        drawSong();
-        drawStatus();
-        drawControls();
     }
     // Detect when the finger is released
-    if (!pressed && previousTouch) {
+      if (!pressed && previousTouch) {
         Serial.println("FINGER RELEASED!");
     }
+
     // Remember the current touch state
     previousTouch = pressed;
 
