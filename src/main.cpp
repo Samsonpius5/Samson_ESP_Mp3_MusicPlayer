@@ -44,6 +44,26 @@ int currentSong = 0;
 bool isPlaying = false;
 bool previousTouch = false;
 
+// Screen management
+enum class Screen {
+    Splash,
+    NowPlaying
+};
+
+Screen currentScreen = Screen::Splash;
+
+// Splash screen timing
+const unsigned long SPLASH_DURATION = 5000;
+unsigned long splashStartTime = 0;
+
+// Loading bar
+const int BAR_X = 70;
+const int BAR_Y = 180;
+const int BAR_WIDTH = 180;
+const int BAR_HEIGHT = 5;
+
+int lastProgressWidth = 0;
+
 
 void inspectSelectedSong() {
 
@@ -190,6 +210,85 @@ void drawStatus() {
 }
 
 
+void drawPlayerScreen() {
+
+    tft.fillScreen(ILI9341_BLACK);
+
+    tft.setTextColor(ILI9341_CYAN);
+    tft.setTextSize(2);
+
+    tft.setCursor(64, 16);
+    tft.print("ESP32 MP3 PLAYER");
+
+    tft.drawFastHLine(
+        15, 45, 290,
+        ILI9341_WHITE
+    );
+
+    tft.setTextSize(1);
+    tft.setCursor(106, 65);
+    tft.print("SELECTED TRACK");
+
+    drawSong();
+    drawStatus();
+    drawControls();
+}
+
+void drawSplashScreen() {
+
+    tft.fillScreen(ILI9341_WHITE);
+
+    uint16_t orange = tft.color565(255, 135, 75);
+    uint16_t purple = tft.color565(160, 105, 225);
+    uint16_t gray = tft.color565(215, 215, 215);
+
+    // Simple headphone icon
+    tft.drawCircle(160, 60, 10, orange);
+
+    // Hide the lower half of the circle
+    tft.fillRect(148, 60, 24, 12, ILI9341_WHITE);
+
+    // Headphone earpieces
+    tft.fillRoundRect(147, 58, 5, 12, 2, orange);
+    tft.fillRoundRect(168, 58, 5, 12, 2, orange);
+
+    // Player name
+    tft.setTextSize(2);
+    tft.setTextColor(orange, ILI9341_WHITE);
+
+    tft.setCursor(112, 92);
+    tft.print("SAMSON'S");
+
+    tft.setCursor(100, 118);
+    tft.print("MP3 PLAYER");
+
+    // Loading message
+    tft.setTextSize(1);
+    tft.setTextColor(purple, ILI9341_WHITE);
+
+    tft.setCursor(73, 155);
+    tft.print("Initializing music library...");
+
+    // Loading bar background
+    tft.fillRoundRect(
+        BAR_X,
+        BAR_Y,
+        BAR_WIDTH,
+        BAR_HEIGHT,
+        3,
+        gray
+    );
+
+    // Footer
+    tft.setTextColor(ILI9341_DARKGREY, ILI9341_WHITE);
+
+    tft.setCursor(109, 215);
+    tft.print("POWERED BY ESP32");
+
+    lastProgressWidth = 0;
+}
+
+
 
 void printPlaybackStatus() {
 
@@ -235,6 +334,49 @@ void previousSong() {
     printPlaybackStatus();
 }
 
+void updateSplashScreen() {
+
+    unsigned long elapsed = millis() - splashStartTime;
+
+    // Calculate progress, maximum 100%
+    unsigned long progressTime = elapsed;
+
+    if (progressTime > SPLASH_DURATION) {
+        progressTime = SPLASH_DURATION;
+    }
+
+    int progressWidth =
+        (progressTime * BAR_WIDTH) / SPLASH_DURATION;
+
+    // Draw only the new part of the bar
+    if (progressWidth > lastProgressWidth) {
+
+        uint16_t purple = tft.color565(180, 85, 200);
+
+        tft.fillRect(
+            BAR_X + lastProgressWidth,
+            BAR_Y,
+            progressWidth - lastProgressWidth,
+            BAR_HEIGHT,
+            purple
+        );
+
+        lastProgressWidth = progressWidth;
+    }
+
+    // Switch screens after five seconds
+    if (elapsed >= SPLASH_DURATION) {
+
+        currentScreen = Screen::NowPlaying;
+
+        isPlaying = false;
+
+        drawPlayerScreen();
+
+        Serial.println("Startup complete!");
+        Serial.println("Now Playing screen loaded.");
+    }
+}
 
 void setup() {
 
@@ -267,32 +409,23 @@ void setup() {
 
     touch.setRotation(1);
 
-    // Draw initial interface
-    tft.fillScreen(ILI9341_BLACK);
+    // Show startup screen
+drawSplashScreen();
 
-    tft.setTextColor(ILI9341_CYAN);
-    tft.setTextSize(2);
+// Start the five-second timer
+splashStartTime = millis();
 
-    tft.setCursor(64, 16);
-    tft.print("ESP32 MP3 PLAYER");
-
-    tft.drawFastHLine(
-        15, 45, 290,
-        ILI9341_WHITE
-    );
-
-    tft.setTextSize(1);
-    tft.setCursor(106, 65);
-    tft.print("SELECTED TRACK");
-
-    drawSong();
-    drawStatus();
-    drawControls();
-
-    Serial.println("Music player controls ready!");
+Serial.println("Splash screen started!");
 }
 
 void loop() {
+
+    if (currentScreen == Screen::Splash) {
+
+    updateSplashScreen();
+
+    return;
+}
 
     bool pressed = touch.touched();
 
