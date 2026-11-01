@@ -1,10 +1,12 @@
 
 #include <Arduino.h>
 #include <SPI.h>
+#include <SD.h>
 #include <cstring>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 #include <XPT2046_Touchscreen.h>
+#include <Preferences.h>
 
 // TFT pins
 #define TFT_CS   27
@@ -13,6 +15,12 @@
 
 // Touch controller
 #define TOUCH_CS 33
+
+// sd card module
+#define SD_CS   32
+#define SD_SCK  14
+#define SD_MISO 16
+#define SD_MOSI 13
 
 // Shared SPI pins
 #define SPI_SCK  18
@@ -25,48 +33,42 @@
 #define RAW_TOP    630
 #define RAW_BOTTOM 3526
 
+
 Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
 XPT2046_Touchscreen touch(TOUCH_CS);
 
+SPIClass sdSPI(HSPI);
+
 // Our simulated music files
 
-const char* songs[] = {
-    "Song 1.mp3",
-    "Song 2.mp3",
-    "Song 3.mp3",
-    "Song 4.mp3",
-    "Song 5.mp3",
-    "Song 6.mp3"
-};
 
-// Demo durations in seconds.
-// Later these will be replaced with actual MP3 metadata.
-const uint16_t songDurations[] = {
-    200, // 3:20
-    178, // 2:58
-    252, // 4:12
-    225, // 3:45
-    310, // 5:10
-    216  // 3:36 - example
-};
+const int MAX_SONGS = 20;
+const int MAX_FILENAME_LENGTH = 128;
+const int MAX_PATH_LENGTH = 192;
 
+// Storage for filenames read from the SD card
+char songNameStorage[MAX_SONGS][MAX_FILENAME_LENGTH] = {};
 
-// Calculate number of songs automatically.
-const int songCount = sizeof(songs) / sizeof(songs[0]);
+// Full file paths for future audio playback
+char songPaths[MAX_SONGS][MAX_PATH_LENGTH] = {};
 
-static_assert(
-    sizeof(songDurations) / sizeof(songDurations[0]) ==
-    sizeof(songs) / sizeof(songs[0]),
-    "Each song must have a duration"
-);
+// Pointers to each stored filename
+const char* songs[MAX_SONGS] = {};
+
+// Duration is unknown until we read audio metadata
+uint16_t songDurations[MAX_SONGS] = {};
+
+// Actual number of MP3 files discovered
+int songCount = 0;
+
 
 int currentSong = 0;
 bool isPlaying = false;
 bool previousTouch = false;
 bool shuffleEnabled = false;
 bool repeatEnabled = false;
-bool favoriteSongs[songCount] = {};
-uint32_t playCounts[songCount] = {};
+bool favoriteSongs[MAX_SONGS] = {};
+uint32_t playCounts[MAX_SONGS] = {};
 
 // Screen management
 enum class Screen {
@@ -100,7 +102,7 @@ const int SONG_ROW_STEP = 29;
 int firstVisibleSong = 0;
 
 // Stores which songs belong to the current list
-int visibleSongIndices[songCount];
+int visibleSongIndices[MAX_SONGS];
 
 // Number of songs in the current list
 int visibleSongCount = 0;
@@ -120,6 +122,10 @@ int lastProgressWidth = 0;
 
 
 void inspectSelectedSong() {
+
+    if (songCount == 0) {
+    return;
+}
 
     const char* selected = songs[currentSong];
 
@@ -290,6 +296,7 @@ void drawControls() {
 // Display selected song
 void drawSong() {
 
+
     // Same background as the player screen
     uint16_t background =
         tft.color565(24, 16, 27);
@@ -309,8 +316,17 @@ void drawSong() {
     tft.setCursor(16, 81);
 
     // Display currently selected song
-    tft.print(songs[currentSong]);
-}
+    if (songCount == 0) {
+    tft.print("NO MP3 FILES");
+    return;
+    }
+
+    char displayTitle[14];
+    strncpy(displayTitle, songs[currentSong], 13);
+    displayTitle[13] = '\0';
+
+    tft.print(displayTitle);
+    }
 
 // Display player state
 void drawStatus() {
@@ -365,11 +381,36 @@ void drawProgressBar() {
     tft.setTextColor(ILI9341_WHITE);
     tft.setTextSize(2);
 
+    
+    // Elapsed time: actual playback is not connected yet
     tft.setCursor(16, 139);
-    tft.print("1:12");
+    tft.print("0:00");
 
-    tft.setCursor(256, 139);
-    tft.print("3:20");
+    // Duration of the selected song
+    tft.setCursor(250, 139);
+
+    if (songCount == 0 ||
+        songDurations[currentSong] == 0) {
+
+        tft.print("--:--");
+
+    } else {
+
+        unsigned int duration = songDurations[currentSong];
+
+        unsigned int minutes = duration / 60;
+        unsigned int seconds = duration % 60;
+
+        tft.print(minutes);
+        tft.print(":");
+
+        if (seconds < 10) {
+            tft.print("0");
+        }
+
+        tft.print(seconds);
+    }
+
 
     // Progress bar dimensions
     const int progressX = 16;
@@ -675,6 +716,9 @@ void drawMusicListScreen() {
     else if (currentScreen == Screen::MostPlayedList) {
         tft.print("No plays recorded yet");
     }
+    else if (currentScreen == Screen::SongList) {
+    tft.print("No MP3 files found");
+    }
 }
 
     for (int row = 0; row < visibleCount; row++) {
@@ -712,25 +756,41 @@ void drawMusicListScreen() {
         tft.setTextColor(ILI9341_WHITE);
         tft.setTextSize(2);
         tft.setCursor(44, rowY + 5);
-        tft.print(songs[index]);
+        // Keep long filenames inside the row
+        char displayName[18];
+
+        strncpy(displayName, songs[index], 17);
+        displayName[17] = '\0';
+
+        tft.print(displayName);
 
         // Song duration
-        unsigned int minutes = songDurations[index] / 60;
-        unsigned int seconds = songDurations[index] % 60;
 
+    // Right-aligned duration area
         tft.setTextColor(mutedText);
         tft.setTextSize(1);
         tft.setCursor(265, rowY + 9);
 
-        tft.print(minutes);
-        tft.print(":");
+        if (songDurations[index] == 0) {
 
-        if (seconds < 10) {
+            tft.print("--:--");
+
+        } else {
+
+            unsigned int minutes = songDurations[index] / 60;
+            unsigned int seconds = songDurations[index] % 60;
+
+            tft.print(minutes);
+            tft.print(":");
+
+            if (seconds < 10) {
             tft.print("0");
-        }
+            }
 
-        tft.print(seconds);
+            tft.print(seconds);
+        }
     }
+
 
     // Scroll indicator
     const int trackY = SONG_LIST_TOP;
@@ -958,6 +1018,9 @@ void printPlaybackStatus() {
 }
 
 void recordDemoPlay() {
+    if (songCount == 0) {
+    return;
+}
     playCounts[currentSong]++;
 
     Serial.print("Demo play count: ");
@@ -969,7 +1032,9 @@ void recordDemoPlay() {
 // Select next song
 
 void nextSong() {
-
+    if (songCount == 0) {
+    return;
+}
     currentSong++;
 
     if (currentSong >= songCount) {
@@ -991,6 +1056,10 @@ void nextSong() {
 // Select previous song
 
 void previousSong() {
+
+    if (songCount == 0) {
+    return;
+}
 
     currentSong--;
 
@@ -1052,21 +1121,373 @@ void updateSplashScreen() {
     }
 }
 
+
+uint16_t readMp3Duration(const char* path) {
+
+    File mp3 = SD.open(path, FILE_READ);
+
+    if (!mp3) {
+        Serial.println("Cannot open MP3 for duration");
+        return 0;
+    }
+
+    uint32_t fileSize = mp3.size();
+    uint32_t position = 0;
+
+    // Check for an ID3 tag at the beginning.
+    // ID3 contains information such as title and artist.
+    uint8_t tag[10];
+
+    if (fileSize >= 10 &&
+        mp3.read(tag, 10) == 10 &&
+        tag[0] == 'I' &&
+        tag[1] == 'D' &&
+        tag[2] == '3') {
+
+        uint32_t tagSize =
+            ((uint32_t)tag[6] << 21) |
+            ((uint32_t)tag[7] << 14) |
+            ((uint32_t)tag[8] << 7) |
+            tag[9];
+
+        position = 10 + tagSize;
+
+        // ID3v2.4 may also contain a footer
+        if (tag[3] == 4 && (tag[5] & 0x10)) {
+            position += 10;
+        }
+    }
+
+    // Bitrates in kilobits per second
+    const uint16_t mpeg1Bitrates[16] = {
+        0, 32, 40, 48, 56, 64, 80, 96,
+        112, 128, 160, 192, 224, 256, 320, 0
+    };
+
+    const uint16_t mpeg2Bitrates[16] = {
+        0, 8, 16, 24, 32, 40, 48, 56,
+        64, 80, 96, 112, 128, 144, 160, 0
+    };
+
+    const uint32_t sampleRates[3] = {
+        44100, 48000, 32000
+    };
+
+    uint64_t totalMicroseconds = 0;
+    uint32_t frameCount = 0;
+
+    // Read MP3 frame headers
+    while (position + 4 <= fileSize) {
+
+        uint8_t header[4];
+
+        if (!mp3.seek(position) ||
+            mp3.read(header, 4) != 4) {
+            break;
+        }
+
+        uint8_t version = (header[1] >> 3) & 3;
+        uint8_t layer = (header[1] >> 1) & 3;
+        uint8_t bitrateIndex = header[2] >> 4;
+        uint8_t sampleRateIndex = (header[2] >> 2) & 3;
+
+        // Ignore invalid or unsupported frame headers
+        if (header[0] != 0xFF ||
+            (header[1] & 0xE0) != 0xE0 ||
+            version == 1 ||
+            layer != 1 ||
+            bitrateIndex == 0 ||
+            bitrateIndex == 15 ||
+            sampleRateIndex == 3) {
+
+            position++;
+            continue;
+        }
+
+        uint32_t sampleRate =
+            sampleRates[sampleRateIndex];
+
+        if (version == 2) {
+            sampleRate /= 2;
+        }
+        else if (version == 0) {
+            sampleRate /= 4;
+        }
+
+        uint16_t bitrate =
+            (version == 3)
+            ? mpeg1Bitrates[bitrateIndex]
+            : mpeg2Bitrates[bitrateIndex];
+
+        uint32_t frameSize =
+            ((version == 3 ? 144000UL : 72000UL)
+             * bitrate) / sampleRate;
+
+        frameSize += (header[2] >> 1) & 1;
+
+        if (frameSize < 4 ||
+            frameSize > fileSize - position) {
+
+            position++;
+            continue;
+        }
+
+        uint16_t samplesPerFrame =
+            (version == 3) ? 1152 : 576;
+
+        totalMicroseconds +=
+            (uint64_t)samplesPerFrame *
+            1000000ULL / sampleRate;
+
+        frameCount++;
+        position += frameSize;
+
+        // Allow the ESP32 to service other tasks
+        if (frameCount % 500 == 0) {
+            yield();
+        }
+    }
+
+    mp3.close();
+
+    if (frameCount == 0) {
+        return 0;
+    }
+
+    uint64_t seconds =
+        (totalMicroseconds + 500000ULL) / 1000000ULL;
+
+    if (seconds == 0) {
+        seconds = 1;
+    }
+
+    if (seconds > 65535) {
+        seconds = 65535;
+    }
+
+    return (uint16_t)seconds;
+}
+
+
+uint32_t makeSongCacheHash(
+    const char* path,
+    uint32_t fileSize
+) {
+    uint32_t hash = 2166136261UL;
+
+    // Include every character in the file path
+    while (*path) {
+        hash ^= (uint8_t)*path++;
+        hash *= 16777619UL;
+    }
+
+    // Include the file size
+    for (int i = 0; i < 4; i++) {
+        hash ^= (uint8_t)(fileSize >> (i * 8));
+        hash *= 16777619UL;
+    }
+
+    return hash;
+}
+
+
+void testSDCard() {
+
+    Serial.println();
+    Serial.println("Checking SD card...");
+
+    songCount = 0;
+    currentSong = 0;
+
+    // Initialize SD card using HSPI
+    if (!SD.begin(SD_CS, sdSPI, 4000000)) {
+        Serial.println("SD initialization FAILED");
+        return;
+    }
+
+    Serial.println("SD initialization SUCCESS!");
+
+    File root = SD.open("/");
+
+    if (!root || !root.isDirectory()) {
+        Serial.println("Cannot open root directory");
+        return;
+    }
+
+    Serial.println("Searching for MP3 files...");
+    Preferences durationCache;
+
+    bool cacheReady =
+        durationCache.begin("songtime", false);
+
+    if (!cacheReady) {
+        Serial.println("Duration cache unavailable");
+    }
+
+    File entry = root.openNextFile();
+
+    while (entry) {
+
+        if (!entry.isDirectory()) {
+
+            const char* filename = entry.name();
+            const char* path = entry.path();
+
+            String lowerName = filename;
+            lowerName.toLowerCase();
+
+            if (lowerName.endsWith(".mp3")) {
+
+                if (songCount >= MAX_SONGS) {
+
+                    Serial.println("Library capacity reached");
+
+                } else if (
+                    strlen(filename) >= MAX_FILENAME_LENGTH ||
+                    strlen(path) >= MAX_PATH_LENGTH
+                ) {
+
+                    Serial.print("Skipped MP3: ");
+                    Serial.println(filename);
+
+                    Serial.print("Filename length: ");
+                    Serial.println(strlen(filename));
+
+                    Serial.print("Path length: ");
+                    Serial.println(strlen(path));
+
+                } else {
+
+                    // Store the actual filename
+                    strcpy(
+                        songNameStorage[songCount],
+                        filename
+                    );
+
+                    // Store its full SD card path
+                    strcpy(
+                        songPaths[songCount],
+                        path
+                    );
+
+                    songs[songCount] =
+                        songNameStorage[songCount];
+            
+
+                    
+                // Create a short cache key from the path and file size
+                uint32_t hash = makeSongCacheHash(
+                    songPaths[songCount],
+                    (uint32_t)entry.size()
+                );
+
+                char cacheKey[10];
+
+                snprintf(
+                    cacheKey,
+                    sizeof(cacheKey),
+                    "d%08lX",
+                    (unsigned long)hash
+                );
+
+                // Check whether we already know this song's duration
+                uint16_t savedDuration = cacheReady
+                    ? durationCache.getUShort(cacheKey, 0)
+                    : 0;
+
+                if (savedDuration > 0) {
+
+                    // Fast path: reuse the previously saved duration
+                    songDurations[songCount] = savedDuration;
+
+                    Serial.print("CACHE HIT: ");
+                    Serial.println(songs[songCount]);
+
+                } else {
+
+                    // Slow path: calculate duration only when necessary
+                    Serial.print("CACHE MISS - Reading: ");
+                    Serial.println(songs[songCount]);
+
+                    songDurations[songCount] =
+                        readMp3Duration(songPaths[songCount]);
+
+                    // Save a successfully calculated duration
+                    if (cacheReady && songDurations[songCount] > 0) {
+                        durationCache.putUShort(
+                            cacheKey,
+                            songDurations[songCount]
+                        );
+                    }
+                }
+
+                // Display the resulting duration
+                Serial.print("Duration: ");
+                Serial.print(songDurations[songCount] / 60);
+                Serial.print(":");
+
+                if (songDurations[songCount] % 60 < 10) {
+                    Serial.print("0");
+                }
+
+                Serial.println(songDurations[songCount] % 60);
+
+
+
+                    Serial.print("MP3 found: ");
+                    Serial.println(songs[songCount]);
+
+                    songCount++;
+                }
+
+            } // End MP3 extension check
+
+        } // End file check
+
+        entry.close();
+        entry = root.openNextFile();
+
+    } // End directory scanning loop
+
+    root.close();
+
+    if (cacheReady) {
+    durationCache.end();
+    }
+
+    Serial.print("Total MP3 songs loaded: ");
+    Serial.println(songCount);
+
+    Serial.println("SD scan completed");
+
+} // End testSDCard()
+
+
+
 void setup() {
 
     Serial.begin(115200);
 
     pinMode(TFT_CS, OUTPUT);
     pinMode(TOUCH_CS, OUTPUT);
+    pinMode(SD_CS, OUTPUT);       // NEW
 
     digitalWrite(TFT_CS, HIGH);
     digitalWrite(TOUCH_CS, HIGH);
+    digitalWrite(SD_CS, HIGH);    // NEW
 
     SPI.begin(
         SPI_SCK,
         SPI_MISO,
         SPI_MOSI
     );
+
+    sdSPI.begin(
+    SD_SCK,
+    SD_MISO,
+    SD_MOSI,
+    SD_CS
+);
 
     // Initialize TFT
     tft.begin();
@@ -1082,6 +1503,9 @@ void setup() {
     }
 
     touch.setRotation(1);
+
+    // NEW: Check SD card and print its files
+    testSDCard();
 
     // Show startup screen
 drawSplashScreen();
@@ -1267,6 +1691,7 @@ void loop() {
                 // Refresh the music controls
                 drawSong();
                 drawStatus();
+                drawProgressBar();
                 drawControls();
                 drawFavouriteHeart();
             }
