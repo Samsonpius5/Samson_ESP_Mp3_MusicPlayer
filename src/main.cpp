@@ -29,16 +29,36 @@ Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
 XPT2046_Touchscreen touch(TOUCH_CS);
 
 // Our simulated music files
+
 const char* songs[] = {
     "Song 1.mp3",
     "Song 2.mp3",
     "Song 3.mp3",
-    "Song 4.mp3"
+    "Song 4.mp3",
+    "Song 5.mp3",
+    "Song 6.mp3"
+};
+
+// Demo durations in seconds.
+// Later these will be replaced with actual MP3 metadata.
+const uint16_t songDurations[] = {
+    200, // 3:20
+    178, // 2:58
+    252, // 4:12
+    225, // 3:45
+    310, // 5:10
+    216  // 3:36 - example
 };
 
 
 // Calculate number of songs automatically.
 const int songCount = sizeof(songs) / sizeof(songs[0]);
+
+static_assert(
+    sizeof(songDurations) / sizeof(songDurations[0]) ==
+    sizeof(songs) / sizeof(songs[0]),
+    "Each song must have a duration"
+);
 
 int currentSong = 0;
 bool isPlaying = false;
@@ -46,12 +66,16 @@ bool previousTouch = false;
 bool shuffleEnabled = false;
 bool repeatEnabled = false;
 bool favoriteSongs[songCount] = {};
+uint32_t playCounts[songCount] = {};
 
 // Screen management
 enum class Screen {
     Splash,
     NowPlaying,
-    Library
+    Library,
+    SongList,
+    FavouritesList,
+    MostPlayedList
 };
 
 Screen currentScreen = Screen::Splash;
@@ -65,6 +89,32 @@ const int BAR_X = 70;
 const int BAR_Y = 180;
 const int BAR_WIDTH = 180;
 const int BAR_HEIGHT = 5;
+
+const int VISIBLE_SONG_ROWS = 5;
+
+const int SONG_LIST_TOP = 78;
+const int SONG_ROW_HEIGHT = 26;
+const int SONG_ROW_STEP = 29;
+
+// Index of the first visible song
+int firstVisibleSong = 0;
+
+// Stores which songs belong to the current list
+int visibleSongIndices[songCount];
+
+// Number of songs in the current list
+int visibleSongCount = 0;
+
+// Song List touch gesture tracking
+int listTouchStartX = 0;
+int listTouchStartY = 0;
+int lastScrollY = 0;
+
+bool listTouchTracking = false;
+bool listWasSwiped = false;
+
+const int SWIPE_THRESHOLD = 18;
+
 
 int lastProgressWidth = 0;
 
@@ -516,6 +566,332 @@ void drawLibraryScreen() {
 
 
 
+void prepareMusicList(Screen listType) {
+
+    visibleSongCount = 0;
+
+    for (int i = 0; i < songCount; i++) {
+
+        bool includeSong = false;
+
+        if (listType == Screen::SongList) {
+            includeSong = true;
+        }
+        else if (listType == Screen::FavouritesList) {
+            includeSong = favoriteSongs[i];
+        }
+        else if (listType == Screen::MostPlayedList) {
+            includeSong = playCounts[i] > 0;
+        }
+
+        if (includeSong) {
+            visibleSongIndices[visibleSongCount] = i;
+            visibleSongCount++;
+        }
+    }
+
+    // Sort Most Played by number of plays
+    if (listType == Screen::MostPlayedList) {
+
+        for (int i = 0; i < visibleSongCount; i++) {
+            for (int j = i + 1; j < visibleSongCount; j++) {
+
+                int first = visibleSongIndices[i];
+                int second = visibleSongIndices[j];
+
+                if (playCounts[second] > playCounts[first]) {
+
+                    int temp = visibleSongIndices[i];
+                    visibleSongIndices[i] = visibleSongIndices[j];
+                    visibleSongIndices[j] = temp;
+                }
+            }
+        }
+    }
+
+    firstVisibleSong = 0;
+}
+
+
+
+void drawMusicListScreen() {
+
+    uint16_t background = tft.color565(24, 16, 27);
+    uint16_t cardColor = tft.color565(36, 30, 43);
+    uint16_t borderColor = tft.color565(68, 57, 76);
+    uint16_t mutedText = tft.color565(180, 170, 185);
+    uint16_t purple = tft.color565(165, 85, 210);
+
+    tft.fillScreen(background);
+
+    // Back arrow
+    tft.drawLine(30, 24, 14, 24, ILI9341_WHITE);
+    tft.drawLine(14, 24, 22, 16, ILI9341_WHITE);
+    tft.drawLine(14, 24, 22, 32, ILI9341_WHITE);
+
+    // Header
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(50, 20);
+    tft.print("ESP32 MUSIC PLAYER");
+
+    // Page title
+    tft.setTextSize(2);
+    tft.setCursor(16, 51);
+    if (currentScreen == Screen::FavouritesList) {
+    tft.print("FAVOURITES");
+    }
+    else if (currentScreen == Screen::MostPlayedList) {
+    tft.print("MOST PLAYED");
+    }
+    else {
+        tft.print("SONG LIST");
+    }
+
+    // DJ shortcut to Now Playing
+    uint16_t orange = tft.color565(255, 135, 75);
+
+    tft.drawCircle(290, 24, 11, orange);
+    tft.drawCircle(290, 24, 6, orange);
+    tft.fillCircle(290, 24, 2, orange);
+
+    
+
+    // How many rows can we draw?
+    int visibleCount = visibleSongCount - firstVisibleSong;
+
+    if (visibleCount > VISIBLE_SONG_ROWS) {
+        visibleCount = VISIBLE_SONG_ROWS;
+    }
+
+    if (visibleSongCount == 0) {
+    tft.setTextColor(mutedText);
+    tft.setTextSize(1);
+    tft.setCursor(50, 115);
+
+    if (currentScreen == Screen::FavouritesList) {
+        tft.print("No favourite songs yet");
+    }
+    else if (currentScreen == Screen::MostPlayedList) {
+        tft.print("No plays recorded yet");
+    }
+}
+
+    for (int row = 0; row < visibleCount; row++) {
+
+        // Actual index in our song array
+        int index = visibleSongIndices[firstVisibleSong + row];
+
+        int rowY = SONG_LIST_TOP + row * SONG_ROW_STEP;
+
+        // Song row
+        tft.fillRoundRect(
+            16, rowY, 284, SONG_ROW_HEIGHT,
+            6, cardColor
+        );
+
+        tft.drawRoundRect(
+            16, rowY, 284, SONG_ROW_HEIGHT,
+            6, borderColor
+        );
+
+        // Six-dot grip icon
+        for (int dotRow = 0; dotRow < 3; dotRow++) {
+            for (int dotCol = 0; dotCol < 2; dotCol++) {
+
+                tft.fillCircle(
+                    26 + dotCol * 6,
+                    rowY + 7 + dotRow * 6,
+                    1,
+                    mutedText
+                );
+            }
+        }
+
+        // Song title
+        tft.setTextColor(ILI9341_WHITE);
+        tft.setTextSize(2);
+        tft.setCursor(44, rowY + 5);
+        tft.print(songs[index]);
+
+        // Song duration
+        unsigned int minutes = songDurations[index] / 60;
+        unsigned int seconds = songDurations[index] % 60;
+
+        tft.setTextColor(mutedText);
+        tft.setTextSize(1);
+        tft.setCursor(265, rowY + 9);
+
+        tft.print(minutes);
+        tft.print(":");
+
+        if (seconds < 10) {
+            tft.print("0");
+        }
+
+        tft.print(seconds);
+    }
+
+    // Scroll indicator
+    const int trackY = SONG_LIST_TOP;
+    const int trackHeight = 142;
+
+    tft.fillRoundRect(
+        307, trackY, 3, trackHeight,
+        1, borderColor
+    );
+
+    int thumbHeight = trackHeight;
+
+    if (visibleSongCount > VISIBLE_SONG_ROWS) {
+    thumbHeight =
+        trackHeight * VISIBLE_SONG_ROWS / visibleSongCount;
+    }
+
+    int maxOffset = visibleSongCount - VISIBLE_SONG_ROWS;
+
+
+    int thumbY = trackY;
+
+    if (maxOffset > 0) {
+        thumbY +=
+            firstVisibleSong * (trackHeight - thumbHeight)
+            / maxOffset;
+    }
+
+    tft.fillRoundRect(
+        306, thumbY, 5, thumbHeight,
+        2, purple
+    );
+}
+
+
+void handleMusicListTouch(bool pressed) {
+
+    if (pressed) {
+
+        TS_Point p = touch.getPoint();
+
+        int x = convertX(p.x);
+        int y = convertY(p.y);
+
+        // A new finger touch begins
+        if (!previousTouch) {
+
+            listTouchStartX = x;
+            listTouchStartY = y;
+            lastScrollY = y;
+
+            listTouchTracking = true;
+            listWasSwiped = false;
+        }
+
+        // Finger is moving across the list
+        else if (listTouchTracking &&
+                 listTouchStartY >= SONG_LIST_TOP) {
+
+            int movement = y - lastScrollY;
+
+            // Distinguish swiping from tapping
+            if (abs(y - listTouchStartY) >= SWIPE_THRESHOLD) {
+                listWasSwiped = true;
+            }
+
+            int maxScroll = visibleSongCount - VISIBLE_SONG_ROWS;
+
+            if (maxScroll < 0) {
+                maxScroll = 0;
+            }
+
+            // Swipe UP: show later songs
+            if (movement <= -SWIPE_THRESHOLD) {
+
+                if (firstVisibleSong < maxScroll) {
+                    firstVisibleSong++;
+                    drawMusicListScreen();
+                }
+
+                lastScrollY = y;
+            }
+
+            // Swipe DOWN: show earlier songs
+            else if (movement >= SWIPE_THRESHOLD) {
+
+                if (firstVisibleSong > 0) {
+                    firstVisibleSong--;
+                    drawMusicListScreen();
+                }
+
+                lastScrollY = y;
+            }
+        }
+    }
+
+    // Finger released
+    else if (previousTouch && listTouchTracking) {
+
+        if (!listWasSwiped) {
+
+            int x = listTouchStartX;
+            int y = listTouchStartY;
+
+            // DJ shortcut: Now Playing
+            if (x >= 270 && y <= 55) {
+
+                currentScreen = Screen::NowPlaying;
+                drawPlayerScreen();
+            }
+
+            // Back: My Library
+            else if (x <= 55 && y <= 55) {
+
+                currentScreen = Screen::Library;
+                drawLibraryScreen();
+            }
+
+            // A song row was tapped
+            else if (x >= 16 && x < 300 &&
+                     y >= SONG_LIST_TOP &&
+                     y < SONG_LIST_TOP +
+                         VISIBLE_SONG_ROWS * SONG_ROW_STEP) {
+
+                int row =
+                    (y - SONG_LIST_TOP) / SONG_ROW_STEP;
+
+                int offset =
+                    (y - SONG_LIST_TOP) % SONG_ROW_STEP;
+
+                
+            int position = firstVisibleSong + row;
+
+            if (
+                row < VISIBLE_SONG_ROWS &&
+                offset < SONG_ROW_HEIGHT &&
+                position < visibleSongCount
+            ) {
+
+                // Get the real index from the filtered list
+                currentSong = visibleSongIndices[position];
+
+                isPlaying = false;
+
+                // Return to Now Playing
+                currentScreen = Screen::NowPlaying;
+                drawPlayerScreen();
+
+                Serial.print("Selected song: ");
+                Serial.println(songs[currentSong]);
+                }
+            }
+        }
+
+        listTouchTracking = false;
+        listWasSwiped = false;
+        }
+    }
+
+
+
 void drawSplashScreen() {
 
     tft.fillScreen(ILI9341_WHITE);
@@ -581,6 +957,14 @@ void printPlaybackStatus() {
     }
 }
 
+void recordDemoPlay() {
+    playCounts[currentSong]++;
+
+    Serial.print("Demo play count: ");
+    Serial.print(songs[currentSong]);
+    Serial.print(" = ");
+    Serial.println(playCounts[currentSong]);
+}
 
 // Select next song
 
@@ -598,6 +982,10 @@ void nextSong() {
     inspectSelectedSong();
 
     printPlaybackStatus();
+
+    if (isPlaying) {
+    recordDemoPlay();
+}
 }
 
 // Select previous song
@@ -614,6 +1002,10 @@ void previousSong() {
     Serial.println(songs[currentSong]);
 
     printPlaybackStatus();
+
+    if (isPlaying) {
+    recordDemoPlay();
+}
 }
 
 void updateSplashScreen() {
@@ -700,25 +1092,38 @@ splashStartTime = millis();
 Serial.println("Splash screen started!");
 }
 
+
 void loop() {
 
+    // 1. Handle startup splash screen
     if (currentScreen == Screen::Splash) {
-
-    updateSplashScreen();
-
-    return;
-}
+        updateSplashScreen();
+        return;
+    }
 
     bool pressed = touch.touched();
 
-    // React only when a new touch begins
+    // 2. Song List needs continuous touch tracking
+    // so that swiping can be detected.
+    if (
+    currentScreen == Screen::SongList ||
+    currentScreen == Screen::FavouritesList ||
+    currentScreen == Screen::MostPlayedList
+) {
+    handleMusicListTouch(pressed);
+
+    previousTouch = pressed;
+
+    delay(30);
+    return;
+}
+
+    // 3. Handle a new touch on other screens
     if (pressed && !previousTouch) {
 
-    Serial.println("NEW TOUCH DETECTED");
+        Serial.println("NEW TOUCH DETECTED");
 
-    TS_Point p = touch.getPoint();
-
-
+        TS_Point p = touch.getPoint();
 
         int x = convertX(p.x);
         int y = convertY(p.y);
@@ -728,105 +1133,156 @@ void loop() {
         Serial.print(" Y: ");
         Serial.println(y);
 
+        // MY LIBRARY SCREEN
+        
+    if (currentScreen == Screen::Library) {
 
-        // Handle touches on the Library screen
-        if (currentScreen == Screen::Library) {
+        // Back to Now Playing
+        if (x <= 55 && y <= 55) {
 
-            // Back button
-            if (x <= 55 && y <= 55) {
+            currentScreen = Screen::NowPlaying;
+            drawPlayerScreen();
+        }
 
-                currentScreen = Screen::NowPlaying;
-                drawPlayerScreen();
+        // All Songs card
+        else if (
+            x >= 16 && x < 304 &&
+            y >= 84 && y < 162
+        ) {
+            currentScreen = Screen::SongList;
 
-                Serial.println("Returned to Now Playing");
+            prepareMusicList(currentScreen);
+            drawMusicListScreen();
+
+            Serial.println("All Songs opened");
+        }
+
+        // Favourites card
+        else if (
+            x >= 16 && x < 156 &&
+            y >= 172 && y < 224
+        ) {
+            currentScreen = Screen::FavouritesList;
+
+            prepareMusicList(currentScreen);
+            drawMusicListScreen();
+
+            Serial.println("Favourites opened");
+        }
+
+        // Most Played card
+        else if (
+            x >= 164 && x < 304 &&
+            y >= 172 && y < 224
+        ) {
+            currentScreen = Screen::MostPlayedList;
+
+            prepareMusicList(currentScreen);
+            drawMusicListScreen();
+
+            Serial.println("Most Played opened");
+        }
+
+        previousTouch = true;
+        return;
+}
+
+
+        // NOW PLAYING SCREEN
+        if (currentScreen == Screen::NowPlaying) {
+
+            // Library button
+            if (x >= 260 && y <= 55) {
+
+                currentScreen = Screen::Library;
+                drawLibraryScreen();
+
+                Serial.println("Library opened");
+
+                previousTouch = true;
+                return;
             }
 
-            previousTouch = true;
-            return;
-        }
+            // Favourite heart
+            if (
+                x >= 266 && x < 310 &&
+                y >= 78 && y < 110
+            ) {
 
-        // Open Library from Now Playing
-        if (currentScreen == Screen::NowPlaying &&
-            x >= 260 && y <= 55) {
+                favoriteSongs[currentSong] =
+                    !favoriteSongs[currentSong];
 
-            currentScreen = Screen::Library;
-            drawLibraryScreen();
-
-            Serial.println("Library opened");
-
-            previousTouch = true;
-            return;
-        }
-
-
-
-        // Respond to touches in the control row
-        if (x >= 266 && x < 310 &&
-    y >= 78 && y < 110) {
-
-    favoriteSongs[currentSong] =
-        !favoriteSongs[currentSong];
-
-    drawFavouriteHeart();
-
-    Serial.println(
-        favoriteSongs[currentSong]
-            ? "ADDED TO FAVOURITES"
-            : "REMOVED FROM FAVOURITES"
-    );
-
-} else if (y >= 182 && y < 240) {
-
-            if (x < 60) {
-
-                // Shuffle
-                shuffleEnabled = !shuffleEnabled;
+                drawFavouriteHeart();
 
                 Serial.println(
-                    shuffleEnabled ? "SHUFFLE ON" : "SHUFFLE OFF"
+                    favoriteSongs[currentSong]
+                    ? "ADDED TO FAVOURITES"
+                    : "REMOVED FROM FAVOURITES"
                 );
+            }
 
-            } else if (x < 126) {
+            // Music controls
+            else if (y >= 182 && y < 240) {
 
-                // Previous song
-                previousSong();
+                if (x < 60) {
 
-            } else if (x < 194) {
+                    shuffleEnabled = !shuffleEnabled;
 
-                // Play or pause
+                    Serial.println(
+                        shuffleEnabled
+                        ? "SHUFFLE ON"
+                        : "SHUFFLE OFF"
+                    );
+
+                } else if (x < 126) {
+
+                    previousSong();
+
+                } else if (x < 194) {
+
                 isPlaying = !isPlaying;
+
+                if (isPlaying) {
+                    recordDemoPlay();
+                }
 
                 printPlaybackStatus();
 
+                
             } else if (x < 260) {
 
-                // Next song
-                nextSong();
+                    nextSong();
 
-            } else {
+                } else {
 
-                // Repeat
-                repeatEnabled = !repeatEnabled;
+                    repeatEnabled = !repeatEnabled;
 
-                Serial.println(
-                    repeatEnabled ? "REPEAT ON" : "REPEAT OFF"
-                );
+                    Serial.println(
+                        repeatEnabled
+                        ? "REPEAT ON"
+                        : "REPEAT OFF"
+                    );
+                }
+
+                // Refresh the music controls
+                drawSong();
+                drawStatus();
+                drawControls();
+                drawFavouriteHeart();
             }
 
-            // Update only the relevant UI elements
-            drawSong();
-            drawStatus();
-            drawControls();
-            drawFavouriteHeart();
-        }
-    }
-    // Detect when the finger is released
-      if (!pressed && previousTouch) {
+        } // Closes NowPlaying condition
+
+    } // Closes new-touch condition
+
+    // 4. Detect finger release
+    if (!pressed && previousTouch) {
         Serial.println("FINGER RELEASED!");
     }
 
-    // Remember the current touch state
+    // 5. Remember touch state
     previousTouch = pressed;
 
     delay(30);
-}
+
+} 
