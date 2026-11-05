@@ -83,6 +83,12 @@ bool isPaused = false;
 bool previousTouch = false;
 bool shuffleEnabled = false;
 bool repeatEnabled = false;
+// Volume control
+bool volumePopupOpen = false;
+bool volumeDragging = false;
+
+int volumePercent = 40;
+const float MAX_VOLUME_GAIN = 0.25f;
 bool favoriteSongs[MAX_SONGS] = {};
 uint32_t playCounts[MAX_SONGS] = {};
 
@@ -236,7 +242,7 @@ void drawButton(
 
     tft.setCursor(textX, textY);
     tft.print(label);
-}
+    }
 
 // Draw all controls
 
@@ -267,36 +273,38 @@ void drawControls() {
     tft.drawLine(41, 194, 46, 199, shuffleColor);
     tft.drawLine(41, 204, 46, 199, shuffleColor);
 
-    // 2. PREVIOUS SONG ICON
-    tft.fillRect(76, 195, 3, 24, white);
-    tft.fillTriangle(
-        80, 207,
-        101, 194,
-        101, 220,
-        white
-    );
+    
+   // 2. PREVIOUS SONG ICON
+tft.fillRect(108, 195, 3, 24, white);
+
+tft.fillTriangle(
+    112, 207,
+    133, 194,
+    133, 220,
+    white
+);
 
     // 3. CIRCULAR PLAY/PAUSE BUTTON
-    tft.fillCircle(160, 207, 24, white);
+    tft.fillCircle(176, 207, 24, white);
 
     if (isPlaying) {
 
         // Pause icon: two vertical bars
         tft.fillRoundRect(
-            151, 195, 6, 24, 2, background
+            167, 195, 6, 24, 2, background
         );
 
         tft.fillRoundRect(
-            163, 195, 6, 24, 2, background
+            179, 195, 6, 24, 2, background
         );
 
     } else {
 
         // Play icon: right-facing triangle
         tft.fillTriangle(
-            154, 194,
-            154, 220,
-            174, 207,
+            170, 194,
+            170, 220,
+            190, 207,
             background
         );
     }
@@ -311,16 +319,31 @@ void drawControls() {
 
     tft.fillRect(240, 195, 3, 24, white);
 
-    // 5. REPEAT ICON
-    tft.drawFastHLine(280, 198, 18, repeatColor);
-    tft.drawLine(298, 198, 304, 204, repeatColor);
-    tft.drawLine(304, 204, 298, 210, repeatColor);
+        // 5. REPEAT ICON - beside Shuffle
+    tft.drawFastHLine(66, 198, 18, repeatColor);
+    tft.drawLine(84, 198, 90, 204, repeatColor);
+    tft.drawLine(90, 204, 84, 210, repeatColor);
 
-    tft.drawFastHLine(280, 216, 18, repeatColor);
-    tft.drawLine(280, 216, 274, 210, repeatColor);
-    tft.drawLine(274, 210, 280, 204, repeatColor);
+    tft.drawFastHLine(66, 216, 18, repeatColor);
+    tft.drawLine(66, 216, 60, 210, repeatColor);
+    tft.drawLine(60, 210, 66, 204, repeatColor);
+
+    // 6. VOLUME ICON - bottom right
+    tft.fillRect(277, 202, 7, 11, white);
+
+    tft.fillTriangle(
+        283, 203,
+        293, 196,
+        293, 220,
+        white
+    );
+
+
+    // Sound waves
+    tft.drawLine(296, 201, 300, 205, white);
+    tft.drawLine(300, 205, 300, 210, white);
+    tft.drawLine(300, 210, 296, 214, white);
 }
-
 
 // Display selected song
 void drawSong() {
@@ -678,6 +701,156 @@ void drawPlayerScreen() {
     drawControls();
     drawFavouriteHeart();
 }
+
+
+// Draw the adjustable volume slider
+void drawVolumeSlider() {
+
+    uint16_t panel = tft.color565(36, 30, 43);
+    uint16_t purple = tft.color565(155, 70, 220);
+    uint16_t orange = tft.color565(255, 135, 75);
+
+    const int sliderX = 77;
+    const int sliderY = 146;
+    const int sliderWidth = 166;
+
+    // Clear only the changing slider area
+    tft.fillRect(69, 136, 183, 26, panel);
+
+    // Full volume track
+    tft.fillRoundRect(
+        sliderX, sliderY,
+        sliderWidth, 6, 3, orange
+    );
+
+    // Current volume level
+    int filledWidth =
+        sliderWidth * volumePercent / 100;
+
+    if (filledWidth > 0) {
+        tft.fillRect(
+            sliderX, sliderY,
+            filledWidth, 6, purple
+        );
+    }
+
+    // Movable white indicator
+    tft.fillCircle(
+        sliderX + filledWidth,
+        sliderY + 3,
+        7,
+        ILI9341_WHITE
+    );
+
+    // Update volume percentage
+    tft.fillRect(140, 164, 50, 12, panel);
+
+    tft.setTextColor(ILI9341_WHITE, panel);
+    tft.setTextSize(1);
+    tft.setCursor(145, 166);
+    tft.print(volumePercent);
+    tft.print("%");
+}
+
+
+// Display the volume popup
+void drawVolumePopup() {
+
+    uint16_t panel = tft.color565(36, 30, 43);
+    uint16_t border = tft.color565(110, 72, 130);
+
+    // Popup panel
+    tft.fillRoundRect(
+        35, 91, 250, 89,
+        8, panel
+    );
+
+    tft.drawRoundRect(
+        35, 91, 250, 89,
+        8, border
+    );
+
+    // Heading
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setTextSize(2);
+    tft.setCursor(52, 102);
+    tft.print("VOLUME");
+
+    // Close X
+    tft.drawLine(
+        260, 103, 272, 115,
+        ILI9341_WHITE
+    );
+
+    tft.drawLine(
+        272, 103, 260, 115,
+        ILI9341_WHITE
+    );
+
+    // Low and high indicators
+    tft.setTextSize(2);
+
+    tft.setCursor(49, 139);
+    tft.print("-");
+
+    tft.setCursor(257, 139);
+    tft.print("+");
+
+    drawVolumeSlider();
+}
+
+
+// Convert finger movement into audio volume
+void updateVolumeFromTouch(int touchX) {
+
+    touchX = constrain(touchX, 77, 243);
+
+    int newVolume = map(
+        touchX, 77, 243, 0, 100
+    );
+
+    if (newVolume == volumePercent) {
+        return;
+    }
+
+    volumePercent = newVolume;
+
+    // Apply the new gain without restarting music
+    if (audioOutput != nullptr) {
+
+        audioOutput->SetGain(
+            MAX_VOLUME_GAIN * volumePercent / 100.0f
+        );
+    }
+
+    drawVolumeSlider();
+
+    Serial.print("Volume: ");
+    Serial.print(volumePercent);
+    Serial.println("%");
+}
+
+
+// Close popup and restore the original display
+void closeVolumePopup() {
+
+        volumePopupOpen = false;
+        volumeDragging = false;
+
+        uint16_t background =
+            tft.color565(24, 16, 27);
+
+        // Restore only the area covered by the popup
+        tft.fillRect(
+            12, 78, 296, 103,
+            background
+        );
+
+        drawSong();
+        drawStatus();
+        drawProgressBar(true);
+        drawFavouriteHeart();
+    }
 
 
 void drawLibraryScreen() {
@@ -1330,7 +1503,9 @@ void startMp3Playback(
     );
 
     // Low volume for the first music test
-    audioOutput->SetGain(0.50f);
+    audioOutput->SetGain(
+    MAX_VOLUME_GAIN * volumePercent / 100.0f
+);
 
     // Mix stereo audio for our single speaker
     audioOutput->SetOutputModeMono(true);
@@ -2184,6 +2359,8 @@ if (mp3Decoder != nullptr &&
 
         // Refresh the player display
         if (currentScreen == Screen::NowPlaying) {
+            volumePopupOpen = false;
+            volumeDragging = false;
 
             drawSong();
             drawStatus();
@@ -2199,6 +2376,7 @@ if (mp3Decoder != nullptr &&
         // Update progress every second while music plays
     if (currentScreen == Screen::NowPlaying &&
         isPlaying &&
+        !volumePopupOpen &&
         millis() - lastProgressUpdateMs >= 1000) {
 
         lastProgressUpdateMs = millis();
@@ -2213,6 +2391,50 @@ if (mp3Decoder != nullptr &&
     }
 
     bool pressed = touch.touched();
+
+    
+// Handle volume popup before other touch controls
+if (currentScreen == Screen::NowPlaying &&
+    volumePopupOpen) {
+
+    if (pressed) {
+
+        TS_Point p = touch.getPoint();
+
+        int x = convertX(p.x);
+        int y = convertY(p.y);
+
+        // Close button at top-right of popup
+        if (!previousTouch &&
+            x >= 252 && x <= 282 &&
+            y >= 95 && y <= 130) {
+
+            closeVolumePopup();
+
+        } else if (
+            volumeDragging ||
+            (x >= 67 && x <= 254 &&
+             y >= 133 && y <= 163)
+        ) {
+
+            // Allow continuous slider dragging
+            volumeDragging = true;
+
+            updateVolumeFromTouch(x);
+        }
+
+    } else {
+
+        // Finger released
+        volumeDragging = false;
+    }
+
+    previousTouch = pressed;
+
+    delay(isPlaying ? 1 : 10);
+    return;
+}
+
 
     // 2. Song List needs continuous touch tracking
     // so that swiping can be detected.
@@ -2351,7 +2573,7 @@ if (currentScreen == Screen::NowPlaying) {
 
         previousTouch = true;
         return;
-}
+    }
 
 
         // NOW PLAYING SCREEN
@@ -2393,23 +2615,34 @@ if (currentScreen == Screen::NowPlaying) {
             // Music controls
             else if (y >= 182 && y < 240) {
 
-                if (x < 60) {
+        
+        if (x < 55) {
 
-                    shuffleEnabled = !shuffleEnabled;
+        shuffleEnabled = !shuffleEnabled;
 
-                    Serial.println(
-                        shuffleEnabled
-                        ? "SHUFFLE ON"
-                        : "SHUFFLE OFF"
-                    );
+        Serial.println(
+        shuffleEnabled
+        ? "SHUFFLE ON"
+        : "SHUFFLE OFF"
+    );
 
-                } else if (x < 126) {
+} else if (x < 93) {
 
-                    previousSong();
+    repeatEnabled = !repeatEnabled;
 
-                } else if (x < 194) {
+    Serial.println(
+        repeatEnabled
+        ? "REPEAT ON"
+        : "REPEAT OFF"
+    );
 
-            
+} else if (x < 136) {
+
+    previousSong();
+
+} else if (x < 194) {
+
+    // Your existing Play/Pause code remains here  
                 
             if (isPlaying) {
 
@@ -2465,16 +2698,14 @@ if (currentScreen == Screen::NowPlaying) {
 
                     nextSong();
 
-                } else {
+             } else {
 
-                    repeatEnabled = !repeatEnabled;
+            // Open the volume popup
+            volumePopupOpen = true;
+            volumeDragging = false;
 
-                    Serial.println(
-                        repeatEnabled
-                        ? "REPEAT ON"
-                        : "REPEAT OFF"
-                    );
-                }
+            Serial.println("Volume popup opened");
+        }
 
                 // Refresh the music controls
                 drawSong();
@@ -2482,6 +2713,10 @@ if (currentScreen == Screen::NowPlaying) {
                 drawProgressBar();
                 drawControls();
                 drawFavouriteHeart();
+
+            if (volumePopupOpen) {
+            drawVolumePopup();
+        }
             }
 
         } // Closes NowPlaying condition
@@ -2497,5 +2732,4 @@ if (currentScreen == Screen::NowPlaying) {
     previousTouch = pressed;
 
     delay(isPlaying ? 1 : 30);
-
 } 
