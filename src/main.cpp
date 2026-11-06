@@ -7,6 +7,11 @@
 #include <Adafruit_ILI9341.h>
 #include <XPT2046_Touchscreen.h>
 #include <Preferences.h>
+#include <ESP_I2S.h>
+#include <math.h>
+#include <AudioFileSourceSD.h>
+#include <AudioGeneratorMP3.h>
+#include <AudioOutputI2S.h>
 
 // TFT pins
 #define TFT_CS   27
@@ -21,6 +26,10 @@
 #define SD_SCK  14
 #define SD_MISO 16
 #define SD_MOSI 13
+// NS4168 amplifier connections
+#define I2S_BCLK 21
+#define I2S_LRC  22
+#define I2S_DOUT 17
 
 // Shared SPI pins
 #define SPI_SCK  18
@@ -38,6 +47,12 @@ Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
 XPT2046_Touchscreen touch(TOUCH_CS);
 
 SPIClass sdSPI(HSPI);
+Preferences songStats;
+bool songStatsReady = false;
+AudioFileSourceSD* audioFile = nullptr;
+AudioGeneratorMP3* mp3Decoder = nullptr;
+AudioOutputI2S* audioOutput = nullptr;
+I2SClass speakerI2S;
 
 // Our simulated music files
 
@@ -64,9 +79,16 @@ int songCount = 0;
 
 int currentSong = 0;
 bool isPlaying = false;
+bool isPaused = false;
 bool previousTouch = false;
 bool shuffleEnabled = false;
 bool repeatEnabled = false;
+// Volume control
+bool volumePopupOpen = false;
+bool volumeDragging = false;
+
+int volumePercent = 40;
+const float MAX_VOLUME_GAIN = 0.25f;
 bool favoriteSongs[MAX_SONGS] = {};
 uint32_t playCounts[MAX_SONGS] = {};
 
@@ -119,6 +141,19 @@ const int SWIPE_THRESHOLD = 18;
 
 
 int lastProgressWidth = 0;
+// Finger tracking for music seeking
+bool seekDragging = false;
+int seekDragX = 16;
+
+void saveFavoriteSong(int songIndex);
+void saveSongPlayCount(int songIndex);
+uint32_t elapsedPlaybackMs = 0;
+uint32_t playbackStartedAtMs = 0;
+uint32_t lastProgressUpdateMs = 0;
+// Allows the touch functions to stop audio playback
+void stopMp3Playback();
+void startMp3Playback(uint32_t startAtMs, bool startPaused);
+void recordDemoPlay();
 
 
 void inspectSelectedSong() {
@@ -207,7 +242,7 @@ void drawButton(
 
     tft.setCursor(textX, textY);
     tft.print(label);
-}
+    }
 
 // Draw all controls
 
@@ -238,36 +273,38 @@ void drawControls() {
     tft.drawLine(41, 194, 46, 199, shuffleColor);
     tft.drawLine(41, 204, 46, 199, shuffleColor);
 
-    // 2. PREVIOUS SONG ICON
-    tft.fillRect(76, 195, 3, 24, white);
-    tft.fillTriangle(
-        80, 207,
-        101, 194,
-        101, 220,
-        white
-    );
+    
+   // 2. PREVIOUS SONG ICON
+tft.fillRect(108, 195, 3, 24, white);
+
+tft.fillTriangle(
+    112, 207,
+    133, 194,
+    133, 220,
+    white
+);
 
     // 3. CIRCULAR PLAY/PAUSE BUTTON
-    tft.fillCircle(160, 207, 24, white);
+    tft.fillCircle(176, 207, 24, white);
 
     if (isPlaying) {
 
         // Pause icon: two vertical bars
         tft.fillRoundRect(
-            151, 195, 6, 24, 2, background
+            167, 195, 6, 24, 2, background
         );
 
         tft.fillRoundRect(
-            163, 195, 6, 24, 2, background
+            179, 195, 6, 24, 2, background
         );
 
     } else {
 
         // Play icon: right-facing triangle
         tft.fillTriangle(
-            154, 194,
-            154, 220,
-            174, 207,
+            170, 194,
+            170, 220,
+            190, 207,
             background
         );
     }
@@ -282,16 +319,31 @@ void drawControls() {
 
     tft.fillRect(240, 195, 3, 24, white);
 
-    // 5. REPEAT ICON
-    tft.drawFastHLine(280, 198, 18, repeatColor);
-    tft.drawLine(298, 198, 304, 204, repeatColor);
-    tft.drawLine(304, 204, 298, 210, repeatColor);
+        // 5. REPEAT ICON - beside Shuffle
+    tft.drawFastHLine(66, 198, 18, repeatColor);
+    tft.drawLine(84, 198, 90, 204, repeatColor);
+    tft.drawLine(90, 204, 84, 210, repeatColor);
 
-    tft.drawFastHLine(280, 216, 18, repeatColor);
-    tft.drawLine(280, 216, 274, 210, repeatColor);
-    tft.drawLine(274, 210, 280, 204, repeatColor);
+    tft.drawFastHLine(66, 216, 18, repeatColor);
+    tft.drawLine(66, 216, 60, 210, repeatColor);
+    tft.drawLine(60, 210, 66, 204, repeatColor);
+
+    // 6. VOLUME ICON - bottom right
+    tft.fillRect(277, 202, 7, 11, white);
+
+    tft.fillTriangle(
+        283, 203,
+        293, 196,
+        293, 220,
+        white
+    );
+
+
+    // Sound waves
+    tft.drawLine(296, 201, 300, 205, white);
+    tft.drawLine(300, 205, 300, 210, white);
+    tft.drawLine(300, 210, 296, 214, white);
 }
-
 
 // Display selected song
 void drawSong() {
@@ -360,94 +412,205 @@ void drawStatus() {
     tft.setTextSize(2);
     tft.setCursor(32, 112);
 
-    if (isPlaying) {
-        tft.print("DEMO - PLAY");
+        if (isPlaying) {
+        tft.print("PLAYING");
+    } else if (isPaused) {
+        tft.print("PAUSED");
     } else {
-        tft.print("DEMO - PAUSE");
+        tft.print("STOPPED");
     }
 }
 
+uint32_t getPlaybackElapsedMs() {
 
-void drawProgressBar() {
+    if (isPlaying) {
+        return elapsedPlaybackMs +
+               (millis() - playbackStartedAtMs);
+    }
+
+    return elapsedPlaybackMs;
+}
+
+
+
+void drawProgressBar(bool fullRedraw = false) {
 
     uint16_t background = tft.color565(24, 16, 27);
     uint16_t purple = tft.color565(155, 70, 220);
     uint16_t orange = tft.color565(255, 135, 75);
 
-    // Clear the progress bar area
-    tft.fillRect(12, 136, 296, 44, background);
-
-    // Time labels
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setTextSize(2);
-
-    
-    // Elapsed time: actual playback is not connected yet
-    tft.setCursor(16, 139);
-    tft.print("0:00");
-
-    // Duration of the selected song
-    tft.setCursor(250, 139);
-
-    if (songCount == 0 ||
-        songDurations[currentSong] == 0) {
-
-        tft.print("--:--");
-
-    } else {
-
-        unsigned int duration = songDurations[currentSong];
-
-        unsigned int minutes = duration / 60;
-        unsigned int seconds = duration % 60;
-
-        tft.print(minutes);
-        tft.print(":");
-
-        if (seconds < 10) {
-            tft.print("0");
-        }
-
-        tft.print(seconds);
-    }
-
-
-    // Progress bar dimensions
     const int progressX = 16;
     const int progressY = 167;
     const int progressWidth = 288;
     const int progressHeight = 6;
 
-    // Simulated progress: approximately 36%
-    const int playedWidth = 104;
+    // Remember what we drew last time
+    static int lastWidth = -1;
+    static int lastSong = -1;
 
-    // Full progress track
-    tft.fillRoundRect(
-        progressX, progressY,
-        progressWidth, progressHeight,
-        3, orange
+    uint32_t elapsedSeconds =
+        getPlaybackElapsedMs() / 1000;
+
+    uint32_t totalSeconds = 0;
+
+    if (songCount > 0) {
+        totalSeconds = songDurations[currentSong];
+    }
+
+    if (totalSeconds > 0 &&
+        elapsedSeconds > totalSeconds) {
+        elapsedSeconds = totalSeconds;
+    }
+
+    int playedWidth = 0;
+
+    if (totalSeconds > 0) {
+        playedWidth =
+            (elapsedSeconds * progressWidth) /
+            totalSeconds;
+    }
+
+    // Full redraw only when necessary
+    bool resetBar =
+        fullRedraw ||
+        lastWidth < 0 ||
+        currentSong != lastSong ||
+        playedWidth < lastWidth;
+
+    if (resetBar) {
+
+        // Clear only for a new screen or reset
+        tft.fillRect(
+            12, 136, 296, 44, background
+        );
+
+        tft.fillRoundRect(
+            progressX, progressY,
+            progressWidth, progressHeight,
+            3, orange
+        );
+
+        if (playedWidth > 0) {
+            tft.fillRect(
+                progressX, progressY,
+                playedWidth, progressHeight,
+                purple
+            );
+        }
+
+    } else if (playedWidth != lastWidth) {
+
+        // Clear only the old and new indicator area
+        int oldX = progressX + lastWidth;
+        int newX = progressX + playedWidth;
+
+        int dirtyLeft = min(oldX, newX) - 8;
+        int dirtyRight = max(oldX, newX) + 8;
+
+        tft.fillRect(
+            dirtyLeft,
+            progressY - 8,
+            dirtyRight - dirtyLeft + 1,
+            22,
+            background
+        );
+
+        // Restore the track inside this small area
+        int trackLeft = max(dirtyLeft, progressX);
+
+        int trackRight = min(
+            dirtyRight,
+            progressX + progressWidth - 1
+        );
+
+        if (trackLeft <= trackRight) {
+
+            tft.fillRect(
+                trackLeft, progressY,
+                trackRight - trackLeft + 1,
+                progressHeight,
+                orange
+            );
+
+            int filledRight = min(
+                trackRight,
+                progressX + playedWidth - 1
+            );
+
+            if (filledRight >= trackLeft) {
+                tft.fillRect(
+                    trackLeft, progressY,
+                    filledRight - trackLeft + 1,
+                    progressHeight,
+                    purple
+                );
+            }
+        }
+    }
+
+    // Draw text directly over its old background.
+    // No full-area clearing every second.
+    tft.setTextColor(
+        ILI9341_WHITE, background
     );
 
-    // Played portion
-    tft.fillRoundRect(
-        progressX, progressY,
-        playedWidth, progressHeight,
-        3, purple
+    tft.setTextSize(2);
+
+    char elapsedText[18];
+
+    snprintf(
+        elapsedText,
+        sizeof(elapsedText),
+        "%lu:%02lu",
+        (unsigned long)(elapsedSeconds / 60),
+        (unsigned long)(elapsedSeconds % 60)
     );
 
-    // Circular progress indicator
+    tft.setCursor(16, 139);
+    tft.print(elapsedText);
+
+    char durationText[18];
+
+    if (totalSeconds == 0) {
+        snprintf(
+            durationText,
+            sizeof(durationText),
+            "--:--"
+        );
+    } else {
+        snprintf(
+            durationText,
+            sizeof(durationText),
+            "%lu:%02lu",
+            (unsigned long)(totalSeconds / 60),
+            (unsigned long)(totalSeconds % 60)
+        );
+    }
+
+    tft.setCursor(250, 139);
+    tft.print(durationText);
+
+    // Draw the indicator at the new position
     tft.fillCircle(
         progressX + playedWidth,
         progressY + 3,
-        7, orange
+        7,
+        orange
     );
 
     tft.drawCircle(
         progressX + playedWidth,
         progressY + 3,
-        7, ILI9341_WHITE
+        7,
+        ILI9341_WHITE
     );
+
+    // Save the position for the next update
+    lastWidth = playedWidth;
+    lastSong = currentSong;
 }
+
+
 
 
 void drawFavouriteHeart() {
@@ -534,10 +697,160 @@ void drawPlayerScreen() {
     // Existing functionality
     drawSong();
     drawStatus();
-    drawProgressBar();
+    drawProgressBar(true);
     drawControls();
     drawFavouriteHeart();
 }
+
+
+// Draw the adjustable volume slider
+void drawVolumeSlider() {
+
+    uint16_t panel = tft.color565(36, 30, 43);
+    uint16_t purple = tft.color565(155, 70, 220);
+    uint16_t orange = tft.color565(255, 135, 75);
+
+    const int sliderX = 77;
+    const int sliderY = 146;
+    const int sliderWidth = 166;
+
+    // Clear only the changing slider area
+    tft.fillRect(69, 136, 183, 26, panel);
+
+    // Full volume track
+    tft.fillRoundRect(
+        sliderX, sliderY,
+        sliderWidth, 6, 3, orange
+    );
+
+    // Current volume level
+    int filledWidth =
+        sliderWidth * volumePercent / 100;
+
+    if (filledWidth > 0) {
+        tft.fillRect(
+            sliderX, sliderY,
+            filledWidth, 6, purple
+        );
+    }
+
+    // Movable white indicator
+    tft.fillCircle(
+        sliderX + filledWidth,
+        sliderY + 3,
+        7,
+        ILI9341_WHITE
+    );
+
+    // Update volume percentage
+    tft.fillRect(140, 164, 50, 12, panel);
+
+    tft.setTextColor(ILI9341_WHITE, panel);
+    tft.setTextSize(1);
+    tft.setCursor(145, 166);
+    tft.print(volumePercent);
+    tft.print("%");
+}
+
+
+// Display the volume popup
+void drawVolumePopup() {
+
+    uint16_t panel = tft.color565(36, 30, 43);
+    uint16_t border = tft.color565(110, 72, 130);
+
+    // Popup panel
+    tft.fillRoundRect(
+        35, 91, 250, 89,
+        8, panel
+    );
+
+    tft.drawRoundRect(
+        35, 91, 250, 89,
+        8, border
+    );
+
+    // Heading
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setTextSize(2);
+    tft.setCursor(52, 102);
+    tft.print("VOLUME");
+
+    // Close X
+    tft.drawLine(
+        260, 103, 272, 115,
+        ILI9341_WHITE
+    );
+
+    tft.drawLine(
+        272, 103, 260, 115,
+        ILI9341_WHITE
+    );
+
+    // Low and high indicators
+    tft.setTextSize(2);
+
+    tft.setCursor(49, 139);
+    tft.print("-");
+
+    tft.setCursor(257, 139);
+    tft.print("+");
+
+    drawVolumeSlider();
+}
+
+
+// Convert finger movement into audio volume
+void updateVolumeFromTouch(int touchX) {
+
+    touchX = constrain(touchX, 77, 243);
+
+    int newVolume = map(
+        touchX, 77, 243, 0, 100
+    );
+
+    if (newVolume == volumePercent) {
+        return;
+    }
+
+    volumePercent = newVolume;
+
+    // Apply the new gain without restarting music
+    if (audioOutput != nullptr) {
+
+        audioOutput->SetGain(
+            MAX_VOLUME_GAIN * volumePercent / 100.0f
+        );
+    }
+
+    drawVolumeSlider();
+
+    Serial.print("Volume: ");
+    Serial.print(volumePercent);
+    Serial.println("%");
+}
+
+
+// Close popup and restore the original display
+void closeVolumePopup() {
+
+        volumePopupOpen = false;
+        volumeDragging = false;
+
+        uint16_t background =
+            tft.color565(24, 16, 27);
+
+        // Restore only the area covered by the popup
+        tft.fillRect(
+            12, 78, 296, 103,
+            background
+        );
+
+        drawSong();
+        drawStatus();
+        drawProgressBar(true);
+        drawFavouriteHeart();
+    }
 
 
 void drawLibraryScreen() {
@@ -930,17 +1243,32 @@ void handleMusicListTouch(bool pressed) {
                 position < visibleSongCount
             ) {
 
-                // Get the real index from the filtered list
+                // Stop any previously playing or paused song
+                stopMp3Playback();
+
+                // Select the song the user touched
                 currentSong = visibleSongIndices[position];
-
-                isPlaying = false;
-
-                // Return to Now Playing
-                currentScreen = Screen::NowPlaying;
-                drawPlayerScreen();
 
                 Serial.print("Selected song: ");
                 Serial.println(songs[currentSong]);
+
+                // Open the Now Playing screen
+                currentScreen = Screen::NowPlaying;
+                drawPlayerScreen();
+
+                // Start the selected song immediately
+                startMp3Playback(0, false);
+
+                // Record a successful playback
+                if (isPlaying) {
+                    recordDemoPlay();
+                }
+
+                // Update the screen to show PLAYING
+                drawStatus();
+                drawControls();
+                drawProgressBar(true);
+
                 }
             }
         }
@@ -1007,13 +1335,269 @@ void drawSplashScreen() {
 }
 
 
+void stopMp3Playback() {
+
+    if (mp3Decoder != nullptr) {
+
+        if (mp3Decoder->isRunning()) {
+            mp3Decoder->stop();
+        }
+
+        delete mp3Decoder;
+        mp3Decoder = nullptr;
+    }
+
+    if (audioFile != nullptr) {
+        audioFile->close();
+        delete audioFile;
+        audioFile = nullptr;
+    }
+
+    if (audioOutput != nullptr) {
+        audioOutput->stop();
+        delete audioOutput;
+        audioOutput = nullptr;
+    }
+
+    isPlaying = false;
+    isPaused = false;
+    elapsedPlaybackMs = 0;
+    playbackStartedAtMs = 0;
+}
+
+
+void startMp3Playback(
+    uint32_t startAtMs = 0,
+    bool startPaused = false
+    ) {
+
+    if (songCount == 0 ||
+        currentSong < 0 ||
+        currentSong >= songCount) {
+
+        Serial.println("No valid song selected");
+        return;
+    }
+
+    // Stop any previously opened song
+    stopMp3Playback();
+
+    Serial.print("Opening MP3: ");
+    Serial.println(songPaths[currentSong]);
+
+    audioFile =
+        new AudioFileSourceSD(songPaths[currentSong]);
+
+    if (audioFile == nullptr ||
+        !audioFile->isOpen()) {
+
+        Serial.println("Cannot open selected MP3");
+        stopMp3Playback();
+        return;
+    }
+
+    
+    // Seek to an approximate position in the MP3 file
+    if (startAtMs > 0 && songDurations[currentSong] > 0) {
+
+        uint32_t totalMs =
+            (uint32_t)songDurations[currentSong] * 1000UL;
+
+        // Avoid starting beyond the end of the file
+        if (startAtMs >= totalMs) {
+            startAtMs = totalMs > 2000
+                ? totalMs - 2000
+                : 0;
+        }
+
+        uint32_t fileSize = audioFile->getSize();
+
+        if (startAtMs > 0 && fileSize > 4096) {
+
+            uint32_t dataStart = 0;
+            uint8_t id3[10];
+
+            // Account for an ID3 metadata tag at the start
+            if (audioFile->seek(0, SEEK_SET) &&
+                audioFile->read(id3, 10) == 10 &&
+                id3[0] == 'I' &&
+                id3[1] == 'D' &&
+                id3[2] == '3') {
+
+                dataStart =
+                    10 +
+                    ((uint32_t)(id3[6] & 0x7F) << 21) +
+                    ((uint32_t)(id3[7] & 0x7F) << 14) +
+                    ((uint32_t)(id3[8] & 0x7F) << 7) +
+                    (uint32_t)(id3[9] & 0x7F);
+
+                if (id3[3] == 4 && (id3[5] & 0x10)) {
+                    dataStart += 10;
+                }
+            }
+
+            if (dataStart < fileSize - 4096) {
+
+                uint32_t audioBytes = fileSize - dataStart;
+
+                uint32_t offset =
+                    dataStart +
+                    (uint32_t)(
+                        ((uint64_t)audioBytes * startAtMs)
+                        / totalMs
+                    );
+
+                // Begin a little earlier so the MP3 decoder
+                // can synchronize with nearby audio frames
+                if (offset > dataStart + 2048) {
+                    offset -= 2048;
+                } else {
+                    offset = dataStart;
+                }
+
+                if (offset > fileSize - 2048) {
+                    offset = fileSize - 2048;
+                }
+
+                if (!audioFile->seek(
+                        (int32_t)offset, SEEK_SET)) {
+
+                    Serial.println("MP3 seek FAILED");
+                    stopMp3Playback();
+                    return;
+                }
+
+                Serial.printf(
+                    "MP3 seek: %lu ms, byte %lu\n",
+                    (unsigned long)startAtMs,
+                    (unsigned long)offset
+                );
+
+            } else {
+
+                startAtMs = 0;
+                audioFile->seek(0, SEEK_SET);
+            }
+
+        } else {
+
+            startAtMs = 0;
+            audioFile->seek(0, SEEK_SET);
+        }
+    }
+
+
+    audioOutput = new AudioOutputI2S();
+
+    if (audioOutput == nullptr) {
+        Serial.println("Cannot create audio output");
+        stopMp3Playback();
+        return;
+    }
+
+    // Use the same pins as our working tone test
+    audioOutput->SetPinout(
+        I2S_BCLK,
+        I2S_LRC,
+        I2S_DOUT
+    );
+
+    // Low volume for the first music test
+    audioOutput->SetGain(
+    MAX_VOLUME_GAIN * volumePercent / 100.0f
+);
+
+    // Mix stereo audio for our single speaker
+    audioOutput->SetOutputModeMono(true);
+
+    mp3Decoder = new AudioGeneratorMP3();
+
+    if (mp3Decoder == nullptr ||
+        !mp3Decoder->begin(audioFile, audioOutput)) {
+
+        Serial.println("MP3 decoder failed");
+        stopMp3Playback();
+        return;
+    }
+
+        isPlaying = !startPaused;
+        isPaused = startPaused;
+
+        elapsedPlaybackMs = startAtMs;
+        playbackStartedAtMs = millis();
+        lastProgressUpdateMs = millis();
+
+        // Keep the output silent if seeking while paused
+        if (startPaused && audioOutput != nullptr) {
+            audioOutput->flush();
+        }
+
+    Serial.println("REAL MP3 PLAYBACK STARTED!");
+}
+
+
+void seekToProgressX(int touchX) {
+
+    if (songCount == 0 ||
+        currentSong < 0 ||
+        currentSong >= songCount ||
+        songDurations[currentSong] == 0) {
+
+        return;
+    }
+
+    const int barLeft = 16;
+    const int barRight = 304;
+    const int barWidth = barRight - barLeft;
+
+    // Keep touch position within the progress bar
+    touchX = constrain(touchX, barLeft, barRight);
+
+    uint32_t totalMs =
+        (uint32_t)songDurations[currentSong] * 1000UL;
+
+    // Convert horizontal position into song time
+    uint32_t targetMs =
+        (uint32_t)(
+            ((uint64_t)(touchX - barLeft) * totalMs)
+            / barWidth
+        );
+
+    // Leave some audio after the requested position
+    if (targetMs >= totalMs) {
+        targetMs = totalMs > 2000
+            ? totalMs - 2000
+            : 0;
+    }
+
+    // Remember whether the player was paused
+    bool remainPaused = isPaused;
+
+    Serial.printf(
+        "Seek requested: %lu seconds\n",
+        (unsigned long)(targetMs / 1000)
+    );
+
+    // Restart the decoder near the requested time
+    startMp3Playback(targetMs, remainPaused);
+
+    // Refresh the player screen
+    if (currentScreen == Screen::NowPlaying) {
+        drawStatus();
+        drawProgressBar(true);
+        drawControls();
+    }
+}
+
 
 void printPlaybackStatus() {
 
     if (isPlaying) {
         Serial.println("Playback status: PLAYING");
-    } else {
+    } else if (isPaused) {
         Serial.println("Playback status: PAUSED");
+    } else {
+        Serial.println("Playback status: STOPPED");
     }
 }
 
@@ -1022,6 +1606,7 @@ void recordDemoPlay() {
     return;
 }
     playCounts[currentSong]++;
+    saveSongPlayCount(currentSong);
 
     Serial.print("Demo play count: ");
     Serial.print(songs[currentSong]);
@@ -1030,37 +1615,77 @@ void recordDemoPlay() {
 }
 
 // Select next song
-
+    
 void nextSong() {
-    if (songCount == 0) {
-    return;
-}
-    currentSong++;
 
-    if (currentSong >= songCount) {
-        currentSong = 0;
+    if (songCount == 0) {
+        return;
+    }
+
+    // Remember whether music was playing
+    bool wasPlaying = isPlaying;
+
+    // Stop the current song
+    stopMp3Playback();
+
+    if (shuffleEnabled && songCount > 1) {
+
+        // Select a random song different from
+        // the currently selected song
+        int randomSong = random(songCount - 1);
+
+        if (randomSong >= currentSong) {
+            randomSong++;
+        }
+
+        currentSong = randomSong;
+
+        Serial.println("SHUFFLE: Random song selected");
+
+    } else {
+
+        // Normal sequential next song
+        currentSong++;
+
+        if (currentSong >= songCount) {
+            currentSong = 0;
+        }
     }
 
     Serial.print("Next song: ");
     Serial.println(songs[currentSong]);
 
-    inspectSelectedSong();
+    // Keep music playing if it was playing before
+    if (wasPlaying) {
+
+        startMp3Playback();
+
+        if (isPlaying) {
+            recordDemoPlay();
+        }
+    }
 
     printPlaybackStatus();
+}
 
-    if (isPlaying) {
-    recordDemoPlay();
-}
-}
+
+
 
 // Select previous song
 
 void previousSong() {
 
     if (songCount == 0) {
-    return;
-}
+        return;
+    }
 
+    // Remember whether music was playing
+    bool wasPlaying = isPlaying;
+
+    // Stop the current track
+    stopMp3Playback();
+
+    // Select the previous song
     currentSong--;
 
     if (currentSong < 0) {
@@ -1070,12 +1695,19 @@ void previousSong() {
     Serial.print("Previous song: ");
     Serial.println(songs[currentSong]);
 
-    printPlaybackStatus();
+    // Automatically play if music was playing
+    if (wasPlaying) {
+        startMp3Playback();
 
-    if (isPlaying) {
-    recordDemoPlay();
+        if (isPlaying) {
+            recordDemoPlay();
+        }
+    }
+
+    printPlaybackStatus();
 }
-}
+
+
 
 void updateSplashScreen() {
 
@@ -1291,6 +1923,103 @@ uint32_t makeSongCacheHash(
 }
 
 
+void makeSongStatsKey(
+    int songIndex,
+    char prefix,
+    char key[10]
+) {
+    // Use the filename/path as a stable identity.
+    // File size is zero because we don't want
+    // play history to depend on the file size.
+    uint32_t hash = makeSongCacheHash(
+        songPaths[songIndex],
+        0
+    );
+
+    snprintf(
+        key,
+        10,
+        "%c%08lX",
+        prefix,
+        (unsigned long)hash
+    );
+}
+
+
+void loadSongStats() {
+
+    songStatsReady = songStats.begin(
+        "songstats",
+        false
+    );
+
+    if (!songStatsReady) {
+        Serial.println("Song NVS initialization FAILED");
+        return;
+    }
+
+    for (int i = 0; i < songCount; i++) {
+
+        char key[10];
+
+        // Restore the favourite flag
+        makeSongStatsKey(i, 'f', key);
+
+        favoriteSongs[i] =
+            songStats.getBool(key, false);
+
+        // Restore the number of plays
+        makeSongStatsKey(i, 'p', key);
+
+        playCounts[i] =
+            songStats.getUInt(key, 0);
+    }
+
+    Serial.println("Song favourites and play counts restored!");
+}
+
+
+void saveFavoriteSong(int songIndex) {
+
+    if (!songStatsReady ||
+        songIndex < 0 ||
+        songIndex >= songCount) {
+        return;
+    }
+
+    char key[10];
+    makeSongStatsKey(songIndex, 'f', key);
+
+    songStats.putBool(
+        key,
+        favoriteSongs[songIndex]
+    );
+
+    Serial.println("Favourite saved to NVS");
+}
+
+
+void saveSongPlayCount(int songIndex) {
+
+    if (!songStatsReady ||
+        songIndex < 0 ||
+        songIndex >= songCount) {
+        return;
+    }
+
+    char key[10];
+    makeSongStatsKey(songIndex, 'p', key);
+
+    songStats.putUInt(
+        key,
+        playCounts[songIndex]
+    );
+
+    Serial.println("Play count saved to NVS");
+}
+
+
+
 void testSDCard() {
 
     Serial.println();
@@ -1463,6 +2192,76 @@ void testSDCard() {
 } // End testSDCard()
 
 
+void testSpeakerTone() {
+
+    Serial.println("Starting I2S speaker test...");
+
+    // Configure the three I2S signal pins
+    speakerI2S.setPins(
+        I2S_BCLK,
+        I2S_LRC,
+        I2S_DOUT
+    );
+
+    // 16 kHz, 16-bit stereo audio
+    if (!speakerI2S.begin(
+        I2S_MODE_STD,
+        16000,
+        I2S_DATA_BIT_WIDTH_16BIT,
+        I2S_SLOT_MODE_STEREO
+    )) {
+        Serial.println("I2S initialization FAILED");
+        return;
+    }
+
+    const int sampleRate = 16000;
+    const int framesPerBlock = 128;
+
+    int16_t samples[framesPerBlock * 2];
+
+    uint32_t sampleNumber = 0;
+    bool writeOK = true;
+
+    // Generate approximately one second of
+    // low-volume 440 Hz audio
+    for (int block = 0; block < 125; block++) {
+
+        for (int i = 0; i < framesPerBlock; i++) {
+
+            float phase =
+                2.0f * PI * 440.0f *
+                sampleNumber / sampleRate;
+
+            int16_t value =
+                (int16_t)(2000.0f * sinf(phase));
+
+            // Same signal in both channels
+            samples[i * 2] = value;
+            samples[i * 2 + 1] = value;
+
+            sampleNumber++;
+        }
+
+        size_t written = speakerI2S.write(
+            (const uint8_t*)samples,
+            sizeof(samples)
+        );
+
+        if (written != sizeof(samples)) {
+            writeOK = false;
+            break;
+        }
+    }
+
+    speakerI2S.end();
+
+    if (writeOK) {
+        Serial.println("I2S test data sent");
+    } else {
+        Serial.println("I2S write FAILED");
+    }
+}
+
 
 void setup() {
 
@@ -1504,10 +2303,12 @@ void setup() {
 
     touch.setRotation(1);
 
-    // NEW: Check SD card and print its files
-    testSDCard();
+   testSDCard();
 
-    // Show startup screen
+// Restore saved favourites and play history
+loadSongStats();
+
+// Show startup screen
 drawSplashScreen();
 
 // Start the five-second timer
@@ -1519,6 +2320,70 @@ Serial.println("Splash screen started!");
 
 void loop() {
 
+        
+    
+// Keep the MP3 decoder supplied with audio data
+if (mp3Decoder != nullptr &&
+    isPlaying &&
+    !isPaused) {
+
+    if (!mp3Decoder->loop()) {
+
+        Serial.println("Song finished!");
+
+        if (repeatEnabled) {
+
+            // Repeat the same song from the beginning
+            Serial.println("REPEAT: Restarting current song");
+
+            stopMp3Playback();
+            startMp3Playback();
+
+            if (isPlaying) {
+                recordDemoPlay();
+            }
+
+        } else if (!shuffleEnabled &&
+                   currentSong == songCount - 1) {
+
+            // Last song finished and Repeat is OFF
+            Serial.println("Playlist finished");
+
+            stopMp3Playback();
+
+        } else {
+
+            // Play the next sequential or random song
+            nextSong();
+        }
+
+        // Refresh the player display
+        if (currentScreen == Screen::NowPlaying) {
+            volumePopupOpen = false;
+            volumeDragging = false;
+
+            drawSong();
+            drawStatus();
+            drawProgressBar(true);
+            drawControls();
+            drawFavouriteHeart();
+        }
+    }
+}
+
+
+
+        // Update progress every second while music plays
+    if (currentScreen == Screen::NowPlaying &&
+        isPlaying &&
+        !volumePopupOpen &&
+        millis() - lastProgressUpdateMs >= 1000) {
+
+        lastProgressUpdateMs = millis();
+
+        drawProgressBar();
+    }
+
     // 1. Handle startup splash screen
     if (currentScreen == Screen::Splash) {
         updateSplashScreen();
@@ -1526,6 +2391,50 @@ void loop() {
     }
 
     bool pressed = touch.touched();
+
+    
+// Handle volume popup before other touch controls
+if (currentScreen == Screen::NowPlaying &&
+    volumePopupOpen) {
+
+    if (pressed) {
+
+        TS_Point p = touch.getPoint();
+
+        int x = convertX(p.x);
+        int y = convertY(p.y);
+
+        // Close button at top-right of popup
+        if (!previousTouch &&
+            x >= 252 && x <= 282 &&
+            y >= 95 && y <= 130) {
+
+            closeVolumePopup();
+
+        } else if (
+            volumeDragging ||
+            (x >= 67 && x <= 254 &&
+             y >= 133 && y <= 163)
+        ) {
+
+            // Allow continuous slider dragging
+            volumeDragging = true;
+
+            updateVolumeFromTouch(x);
+        }
+
+    } else {
+
+        // Finger released
+        volumeDragging = false;
+    }
+
+    previousTouch = pressed;
+
+    delay(isPlaying ? 1 : 10);
+    return;
+}
+
 
     // 2. Song List needs continuous touch tracking
     // so that swiping can be detected.
@@ -1538,9 +2447,64 @@ void loop() {
 
     previousTouch = pressed;
 
-    delay(30);
+    delay(isPlaying ? 1 : 30);
     return;
 }
+
+
+// Touch-to-seek on the Now Playing progress bar
+if (currentScreen == Screen::NowPlaying) {
+
+    // Detect the beginning of a touch on the bar
+    if (pressed && !previousTouch) {
+
+        TS_Point p = touch.getPoint();
+
+        int x = convertX(p.x);
+        int y = convertY(p.y);
+
+        // Expanded touch area around the timeline
+        if (x >= 12 && x <= 308 &&
+            y >= 155 && y <= 180 &&
+            songCount > 0 &&
+            songDurations[currentSong] > 0) {
+
+            seekDragging = true;
+            seekDragX = constrain(x, 16, 304);
+
+            previousTouch = true;
+            delay(1);
+            return;
+        }
+    }
+
+    // Track movement until the finger is released
+    if (seekDragging) {
+
+        if (pressed) {
+
+            TS_Point p = touch.getPoint();
+
+            seekDragX = constrain(
+                convertX(p.x),
+                16,
+                304
+            );
+
+        } else {
+
+            // Finger released: seek once
+            seekDragging = false;
+
+            seekToProgressX(seekDragX);
+        }
+
+        previousTouch = pressed;
+        delay(1);
+        return;
+    }
+}
+
 
     // 3. Handle a new touch on other screens
     if (pressed && !previousTouch) {
@@ -1609,7 +2573,7 @@ void loop() {
 
         previousTouch = true;
         return;
-}
+    }
 
 
         // NOW PLAYING SCREEN
@@ -1633,10 +2597,13 @@ void loop() {
                 y >= 78 && y < 110
             ) {
 
-                favoriteSongs[currentSong] =
-                    !favoriteSongs[currentSong];
+            favoriteSongs[currentSong] =
+            !favoriteSongs[currentSong];
 
-                drawFavouriteHeart();
+        // Save the change to ESP32 flash
+        saveFavoriteSong(currentSong);
+
+        drawFavouriteHeart();
 
                 Serial.println(
                     favoriteSongs[currentSong]
@@ -1648,45 +2615,97 @@ void loop() {
             // Music controls
             else if (y >= 182 && y < 240) {
 
-                if (x < 60) {
+        
+        if (x < 55) {
 
-                    shuffleEnabled = !shuffleEnabled;
+        shuffleEnabled = !shuffleEnabled;
 
-                    Serial.println(
-                        shuffleEnabled
-                        ? "SHUFFLE ON"
-                        : "SHUFFLE OFF"
-                    );
+        Serial.println(
+        shuffleEnabled
+        ? "SHUFFLE ON"
+        : "SHUFFLE OFF"
+    );
 
-                } else if (x < 126) {
+} else if (x < 93) {
 
-                    previousSong();
+    repeatEnabled = !repeatEnabled;
 
-                } else if (x < 194) {
+    Serial.println(
+        repeatEnabled
+        ? "REPEAT ON"
+        : "REPEAT OFF"
+    );
 
-                isPlaying = !isPlaying;
+} else if (x < 136) {
 
-                if (isPlaying) {
-                    recordDemoPlay();
+    previousSong();
+
+} else if (x < 194) {
+
+    // Your existing Play/Pause code remains here  
+                
+            if (isPlaying) {
+
+                // Save elapsed time before pausing
+                elapsedPlaybackMs +=
+                    millis() - playbackStartedAtMs;
+
+                isPlaying = false;
+                isPaused = true;
+
+                // Replace buffered audio with silence
+                if (audioOutput != nullptr) {
+                    audioOutput->flush();
+                }
+
+                Serial.println("MP3 PAUSED");
+
+            } else if (isPaused) {
+
+
+                    // Resume from the preserved decoder position
+                    if (mp3Decoder != nullptr &&
+                        mp3Decoder->isRunning()) {
+
+                        isPaused = false;
+                        playbackStartedAtMs = millis();
+                        isPlaying = true;
+
+                        Serial.println("MP3 RESUMED");
+
+                    } else {
+
+                        // Recovery if decoder is no longer available
+                        isPaused = false;
+                        startMp3Playback();
+                    }
+
+                } else {
+
+                    // Start a new song
+                    startMp3Playback();
+
+                    if (isPlaying) {
+                        recordDemoPlay();
+                    }
                 }
 
                 printPlaybackStatus();
+
 
                 
             } else if (x < 260) {
 
                     nextSong();
 
-                } else {
+             } else {
 
-                    repeatEnabled = !repeatEnabled;
+            // Open the volume popup
+            volumePopupOpen = true;
+            volumeDragging = false;
 
-                    Serial.println(
-                        repeatEnabled
-                        ? "REPEAT ON"
-                        : "REPEAT OFF"
-                    );
-                }
+            Serial.println("Volume popup opened");
+        }
 
                 // Refresh the music controls
                 drawSong();
@@ -1694,6 +2713,10 @@ void loop() {
                 drawProgressBar();
                 drawControls();
                 drawFavouriteHeart();
+
+            if (volumePopupOpen) {
+            drawVolumePopup();
+        }
             }
 
         } // Closes NowPlaying condition
@@ -1708,6 +2731,5 @@ void loop() {
     // 5. Remember touch state
     previousTouch = pressed;
 
-    delay(30);
-
+    delay(isPlaying ? 1 : 30);
 } 
